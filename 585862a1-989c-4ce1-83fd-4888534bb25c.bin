@@ -1,0 +1,16 @@
+{
+  "version": "1.0.0",
+  "name": "RWBY Scene Multi-Gen",
+  "identifier": "rwby_scene_multi_gen",
+  "author": "User & Mousey",
+  "description": "Automatically generates multiple scene-reactive NovelAI images per assistant reply using the universal RWBY card style recipe and attaches them directly to the message.",
+  "permissions": [
+    "image_gen",
+    "chats",
+    "chat_mutation",
+    "generation",
+    "characters"
+  ],
+  "entry_backend": "backend.js",
+  "minimum_lumiverse_version": "0.1.0"
+}
