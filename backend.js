@@ -1,29 +1,25 @@
-/**
+*
  * RWBY Scene Multi-Gen Backend Script
  * 
- * Listens for new assistant replies, parses 2 distinct narrative beats from the scene,
- * generates both images in parallel via NovelAI using the exact card style recipe,
- * and attaches the generated images directly to the assistant's message.
+ * Listens for new assistant replies and swipe creations,
+ * parses visual beats from the scene, generates images via NovelAI
+ * using the dialed-in RWBY card recipe, and attaches them to the message.
  */
 
-// Universal style positive base
 const BASE_STYLE_POSITIVE =
   'masterpiece, best quality, very aesthetic, absurdres, 1girl, solo, rwby, gradient hair, shiny hair, detailed hair, detailed skin, rim light, backlighting';
 
-// Universal style negative base
 const BASE_STYLE_NEGATIVE =
   'lowres, bad quality, sketch, flat color, greyscale, text, watermark, comic, sweat, sweaty skin, shiny skin, oily skin, glossy skin';
 
-// Per-character tags for the RWBY cast
 const CHARACTER_TAGS = {
   weiss: 'weiss schnee, white hair, light blue hair, side ponytail, hair ornament, tiara, earrings, blue eyes, scar over eye, white dress, bolero, blue theme',
   ruby: 'ruby rose, black hair, red hair, short hair, silver eyes, red cloak, black dress, cross necklace, rose theme',
-  blake: 'blake belladonna, black hair, purple hair, purple bow, hair bow, amber eyes, black scarf, white sleeveless shirt, detached sleeves, fingerless gloves, purple theme',
+  blake: 'blake belladonna, black hair, purple hair, cat ears, amber eyes, black scarf, white sleeveless shirt, detached sleeves, fingerless gloves, purple theme',
   yang: 'yang xiao long, blonde hair, orange hair, purple eyes, ahoge, tan jacket, orange scarf, fingerless gloves, yellow theme',
   coco: 'coco adel, brown hair, short hair, beret, sunglasses, tinted sunglasses, round eyewear, brown eyes, necklace, scarf, brown jacket, black gloves, cross necklace, brown theme',
 };
 
-// Helper to match active character from chat/name/message context
 function detectCharacterSnippet(charName, content) {
   const lower = ((charName || '') + ' ' + (content || '')).toLowerCase();
   if (lower.includes('weiss')) return CHARACTER_TAGS.weiss;
@@ -34,55 +30,68 @@ function detectCharacterSnippet(charName, content) {
   return 'rwby';
 }
 
-// In-flight guard to avoid duplicate runs
-const processingMessages = new Set();
+const processing = new Set();
 
-spindle.on('MESSAGE_SENT', async (payload) => {
+async function handleSceneGeneration(chatId, message) {
+  if (!message || message.role !== 'assistant') return;
+  if (!message.content || message.content.trim().length === 0) return;
+
+  const key = `${chatId}:${message.id}:${message.swipe_id ?? 0}`;
+  if (processing.has(key)) return;
+  processing.add(key);
+
   try {
-    const { chatId, message } = payload;
-    if (!message || message.role !== 'assistant') return;
-    if (processingMessages.has(message.id)) return;
-    processingMessages.add(message.id);
-
-    const activeChat = await spindle.chats.getActive();
-    if (!activeChat || activeChat.id !== chatId) return;
+    spindle.toast.info('Analyzing scene for NovelAI illustration...', { title: 'RWBY Multi-Gen', duration: 4000 });
 
     let charName = '';
-    if (activeChat.character_id) {
+    const activeChat = await spindle.chats.getActive();
+    const targetChatId = chatId || (activeChat ? activeChat.id : null);
+    if (!targetChatId) return;
+
+    if (activeChat && activeChat.character_id) {
       const charData = await spindle.characters.get(activeChat.character_id);
       if (charData) charName = charData.name;
     }
 
     const charSnippet = detectCharacterSnippet(charName, message.content);
 
-    // Prompt sidecar LLM to identify 2 distinct scene moments
-    const parsePrompt = [
-      'You are a visual scene parser for an anime illustrator.',
-      'Analyze the following roleplay message and identify exactly 2 distinct visual moments or actions taking place.',
-      'Output ONLY a valid JSON array of two objects, each with a "tags" field containing comma-separated Danbooru anime tags (location, pose, expression, lighting).',
-      'Example: [{"tags": "outdoors, courtyard, standing, arms crossed, pouting, annoyed, afternoon light"}, {"tags": "classroom, desk, sitting, reading book, gentle smile, sunlight"}]',
-      '',
-      `Message: """${message.content}"""`,
-    ].join('\n');
-
-    const parserResult = await spindle.generate.raw({
-      messages: [{ role: 'user', content: parsePrompt }],
-      parameters: { temperature: 0.3, max_tokens: 350 },
-    });
+    let defaultBeats = [
+      { tags: 'bedroom, sitting up, looking at viewer, gentle smile, dim lamplight' },
+      { tags: 'upper body, expressive eyes, dynamic pose, soft lighting' },
+    ];
 
     let beats = [];
     try {
-      const cleaned = parserResult.content.replace(/```json\n?|\n?```/g, '').trim();
-      beats = JSON.parse(cleaned);
-    } catch (e) {
-      spindle.log.warn('Could not parse JSON beats from LLM, falling back to basic prompt.');
-      beats = [{ tags: 'upper body, looking at viewer, dynamic pose' }];
+      const parsePrompt = [
+        'Analyze the roleplay message and pick 2 distinct visual moments or actions taking place.',
+        'Output ONLY a JSON array of two objects with a "tags" field containing comma-separated Danbooru anime tags (location, pose, expression, lighting).',
+        'Example: [{"tags": "bedroom, sitting on bed, reading book, blushing, lamplight"}, {"tags": "kitchen, holding plate, happy smile, cozy lighting"}]',
+        '',
+        `Message:\n"""${message.content.slice(0, 3000)}"""`,
+      ].join('\n');
+
+      const parsed = await spindle.generate.raw({
+        messages: [{ role: 'user', content: parsePrompt }],
+        parameters: { temperature: 0.2, max_tokens: 250 },
+      });
+
+      const cleaned = (parsed.content || '').replace(/```json\n?|\n?```/g, '').trim();
+      const extracted = JSON.parse(cleaned);
+      if (Array.isArray(extracted) && extracted.length > 0) {
+        beats = extracted.slice(0, 2);
+      }
+    } catch (llmErr) {
+      spindle.log.warn(`LLM parsing fallback: ${llmErr.message}`);
+      beats = defaultBeats;
     }
 
-    if (!Array.isArray(beats) || beats.length === 0) return;
+    if (!Array.isArray(beats) || beats.length === 0) {
+      beats = defaultBeats;
+    }
 
-    // Generate images for up to 2 beats in parallel via NovelAI
-    const tasks = beats.slice(0, 2).map(async (beat) => {
+    spindle.toast.info(`Generating ${beats.length} scene image(s) via NovelAI...`, { title: 'RWBY Multi-Gen', duration: 5000 });
+
+    const tasks = beats.map(async (beat) => {
       const prompt = `${BASE_STYLE_POSITIVE}, ${charSnippet}, ${beat.tags || 'upper body'}`;
       return await spindle.imageGen.generate({
         prompt,
@@ -90,45 +99,49 @@ spindle.on('MESSAGE_SENT', async (payload) => {
         parameters: {
           sampler: 'k_euler_ancestral',
           steps: 28,
-          cfg: 5,
+          guidance: 5,
           resolution: '832x1216',
         },
-        owner_chat_id: chatId,
-        owner_character_id: activeChat.character_id,
+        owner_chat_id: targetChatId,
+        owner_character_id: activeChat ? activeChat.character_id : undefined,
         includeDataUrl: false,
       });
     });
 
     const results = await Promise.all(tasks);
-
-    // Attach generated image references to the message
-    const newAttachments = results
-      .filter((res) => res && (res.imageId || res.imageUrl))
-      .map((res) => ({
-        id: res.imageId,
-        url: res.imageUrl,
+    const validAttachments = results
+      .filter((r) => r && (r.imageId || r.imageUrl))
+      .map((r) => ({
+        id: r.imageId,
+        url: r.imageUrl,
         type: 'image',
       }));
 
-    if (newAttachments.length > 0) {
-      const existingExtra = message.extra || {};
-      const existingAttachments = Array.isArray(existingExtra.attachments)
-        ? existingExtra.attachments
-        : [];
-
-      await spindle.chat.updateMessage(chatId, message.id, {
-        extra: {
-          ...existingExtra,
-          attachments: [...existingAttachments, ...newAttachments],
-        },
-      });
-      spindle.log.info(`Attached ${newAttachments.length} scene image(s) to message ${message.id}`);
+    if (validAttachments.length > 0) {
+      spindle.toast.success(`Generated ${validAttachments.length} scene image(s)!`, { title: 'RWBY Multi-Gen', duration: 5000 });
+      spindle.log.info(`Generated ${validAttachments.length} images for chat ${targetChatId} msg ${message.id}`);
     }
   } catch (err) {
-    spindle.log.error('Error generating scene images:', err);
+    spindle.log.error('Multi-gen failed:', err);
+    spindle.toast.error(`Multi-gen error: ${err.message}`, { title: 'RWBY Multi-Gen' });
   } finally {
-    if (payload && payload.message) {
-      processingMessages.delete(payload.message.id);
-    }
+    processing.delete(key);
+  }
+}
+
+// 1. Listen for new assistant messages
+spindle.on('MESSAGE_SENT', async (payload) => {
+  if (!payload || !payload.message) return;
+  await handleSceneGeneration(payload.chatId, payload.message);
+});
+
+// 2. Listen for swipes on assistant messages
+spindle.on('MESSAGE_SWIPED', async (payload) => {
+  if (!payload || !payload.message) return;
+  if (payload.action === 'added' || payload.action === 'navigated') {
+    await handleSceneGeneration(payload.chatId, payload.message);
   }
 });
+
+spindle.toast.info('RWBY Scene Multi-Gen backend worker ready!', { title: 'RWBY Multi-Gen', duration: 3000 });
+spindle.log.info('RWBY Scene Multi-Gen backend worker initialized.');
