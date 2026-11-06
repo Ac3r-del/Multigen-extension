@@ -1,4 +1,4 @@
-*
+/**
  * RWBY Scene Multi-Gen Backend Script
  * 
  * Listens for new assistant replies and swipe creations,
@@ -55,6 +55,7 @@ async function handleSceneGeneration(chatId, message) {
 
     const charSnippet = detectCharacterSnippet(charName, message.content);
 
+    // Fallback default beats based on detected character
     let defaultBeats = [
       { tags: 'bedroom, sitting up, looking at viewer, gentle smile, dim lamplight' },
       { tags: 'upper body, expressive eyes, dynamic pose, soft lighting' },
@@ -81,7 +82,7 @@ async function handleSceneGeneration(chatId, message) {
         beats = extracted.slice(0, 2);
       }
     } catch (llmErr) {
-      spindle.log.warn(`LLM parsing fallback: ${llmErr.message}`);
+      spindle.log.warn(`LLM parsing failed or timed out: ${llmErr.message}, using scene fallbacks.`);
       beats = defaultBeats;
     }
 
@@ -118,7 +119,17 @@ async function handleSceneGeneration(chatId, message) {
       }));
 
     if (validAttachments.length > 0) {
-      spindle.toast.success(`Generated ${validAttachments.length} scene image(s)!`, { title: 'RWBY Multi-Gen', duration: 5000 });
+      // Append formatted image containers directly into message content for seamless inline rendering
+      const imageMarkup = validAttachments
+        .map((att) => `\n<div class="pimage-container" style="background-image: url('${att.url}');" tabindex="0"></div>`)
+        .join('\n');
+
+      const updatedContent = (message.content || '').trimEnd() + '\n' + imageMarkup + '\n';
+      await spindle.chats.updateMessage(targetChatId, message.id, {
+        content: updatedContent,
+      });
+
+      spindle.toast.success(`Generated and attached ${validAttachments.length} scene image(s)!`, { title: 'RWBY Multi-Gen', duration: 5000 });
       spindle.log.info(`Generated ${validAttachments.length} images for chat ${targetChatId} msg ${message.id}`);
     }
   } catch (err) {
@@ -135,7 +146,7 @@ spindle.on('MESSAGE_SENT', async (payload) => {
   await handleSceneGeneration(payload.chatId, payload.message);
 });
 
-// 2. Listen for swipes on assistant messages
+// 2. Listen for swipes generated on assistant messages
 spindle.on('MESSAGE_SWIPED', async (payload) => {
   if (!payload || !payload.message) return;
   if (payload.action === 'added' || payload.action === 'navigated') {
