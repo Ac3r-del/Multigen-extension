@@ -1,7 +1,7 @@
 /**
  * RWBY Scene Multi-Gen Backend Script
  * 
- * Listens for new assistant replies and swipe creations,
+ * Listens for new assistant replies and swipe additions,
  * parses visual beats from the scene, generates images via NovelAI
  * using the dialed-in RWBY card recipe, and attaches them to the message.
  */
@@ -55,7 +55,6 @@ async function handleSceneGeneration(chatId, message) {
 
     const charSnippet = detectCharacterSnippet(charName, message.content);
 
-    // Fallback default beats based on detected character
     let defaultBeats = [
       { tags: 'bedroom, sitting up, looking at viewer, gentle smile, dim lamplight' },
       { tags: 'upper body, expressive eyes, dynamic pose, soft lighting' },
@@ -119,13 +118,12 @@ async function handleSceneGeneration(chatId, message) {
       }));
 
     if (validAttachments.length > 0) {
-      // Append formatted image containers directly into message content for seamless inline rendering
       const imageMarkup = validAttachments
         .map((att) => `\n<div class="pimage-container" style="background-image: url('${att.url}');" tabindex="0"></div>`)
         .join('\n');
 
       const updatedContent = (message.content || '').trimEnd() + '\n' + imageMarkup + '\n';
-      await spindle.chats.updateMessage(targetChatId, message.id, {
+      await spindle.chat.updateMessage(targetChatId, message.id, {
         content: updatedContent,
       });
 
@@ -146,11 +144,38 @@ spindle.on('MESSAGE_SENT', async (payload) => {
   await handleSceneGeneration(payload.chatId, payload.message);
 });
 
-// 2. Listen for swipes generated on assistant messages
+// 2. Listen for newly added swipes
 spindle.on('MESSAGE_SWIPED', async (payload) => {
   if (!payload || !payload.message) return;
-  if (payload.action === 'added' || payload.action === 'navigated') {
+  if (payload.action === 'added') {
     await handleSceneGeneration(payload.chatId, payload.message);
+  }
+});
+
+// 3. Register Command Palette action for on-demand generation
+spindle.commands.register([
+  {
+    id: 'generate-scene-images',
+    label: 'Generate Scene Images for Message',
+    description: 'Generates NovelAI illustrations for the current scene message',
+    keywords: ['image', 'scene', 'generate', 'novelai', 'illustrate'],
+    scope: 'chat',
+  },
+]);
+
+spindle.commands.onInvoked(async (commandId, context) => {
+  if (commandId === 'generate-scene-images' && context && context.chatId) {
+    try {
+      const messages = await spindle.chat.getMessages(context.chatId, { tail: 5 });
+      const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+      if (lastAssistant) {
+        await handleSceneGeneration(context.chatId, lastAssistant);
+      } else {
+        spindle.toast.warning('No assistant message found to illustrate.');
+      }
+    } catch (err) {
+      spindle.toast.error(`Manual trigger error: ${err.message}`);
+    }
   }
 });
 
