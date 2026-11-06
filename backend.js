@@ -1,22 +1,19 @@
 /**
  * RWBY Scene Multi-Gen Backend Script
  * 
- * Multi-user and operator-scoped compatible.
  * Generates NovelAI illustrations sequentially with retry/backoff
  * to prevent 429 "Concurrent generation is locked" errors.
  * 
  * Features:
- * - Dynamic image count setting (1 to 4 images per assistant reply).
- * - NSFW toggle (nsfw: true allows spicy/ecchi/explicit scene beats and tags,
- *   removes solo/1girl restriction if pairing/sex, avoids purity suppression).
- * - Command palette quick actions.
+ * - Dynamic image count (1 to 4 images per assistant reply).
+ * - NSFW toggle (intimate, passionate, and explicit scene beats allowed).
  */
 
-// Global configuration with sensible defaults
+// Configure generation settings here:
 let CONFIG = {
-  imageCount: 2,        // Number of images to generate (1 - 4)
-  allowNsfw: true,      // Allow NSFW/ecchi/spicy tags when scene is intimate
-  aspectRatio: '832x1216', // Default portrait resolution
+  imageCount: 2,        // Number of images to generate (1 to 4)
+  allowNsfw: true,      // Set to true for NSFW/intimate scenes, false for SFW only
+  aspectRatio: '832x1216',
   steps: 28,
   guidance: 5.0,
 };
@@ -24,11 +21,9 @@ let CONFIG = {
 const BASE_STYLE_POSITIVE =
   'masterpiece, best quality, very aesthetic, absurdres, rwby, gradient hair, shiny hair, detailed hair, detailed skin, rim light, backlighting';
 
-// SFW mode bans explicit and nude content
 const BASE_STYLE_NEGATIVE_SFW =
   'lowres, bad quality, sketch, flat color, greyscale, text, watermark, comic, sweat, sweaty skin, shiny skin, oily skin, glossy skin, nsfw, nude, explicit';
 
-// NSFW mode removes the purity ban while keeping clean matte anime skin
 const BASE_STYLE_NEGATIVE_NSFW =
   'lowres, bad quality, sketch, flat color, greyscale, text, watermark, comic, shiny skin, oily skin, glossy skin, bad anatomy, deformed';
 
@@ -150,14 +145,18 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
     spindle.toast.info('Analyzing scene for NovelAI illustration...', { title: 'RWBY Multi-Gen', duration: 4000 });
 
     let charName = '';
-    const activeChat = await spindle.chats.getActive(effectiveUserId);
-    if (activeChat && activeChat.character_id) {
-      const charData = await spindle.characters.get(activeChat.character_id, effectiveUserId);
-      if (charData) charName = charData.name;
+    try {
+      const activeChat = await spindle.chats.getActive(effectiveUserId);
+      if (activeChat && activeChat.character_id) {
+        const charData = await spindle.characters.get(activeChat.character_id, effectiveUserId);
+        if (charData) charName = charData.name;
+      }
+    } catch (e) {
+      spindle.log.warn('Could not fetch active character name:', e);
     }
 
     const charSnippet = detectCharacterSnippet(charName, content);
-    const count = Math.max(1, Math.min(4, CONFIG.imageCount || 2));
+    const count = Math.max(1, Math.min(4, Number(CONFIG.imageCount) || 2));
     const isNsfwAllowed = Boolean(CONFIG.allowNsfw);
 
     let defaultBeats = [
@@ -230,7 +229,7 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
           resolution: CONFIG.aspectRatio || '832x1216',
         },
         owner_chat_id: chatId,
-        owner_character_id: activeChat ? activeChat.character_id : undefined,
+        owner_character_id: '874fc0e0-718b-4e09-b379-713547937591',
         includeDataUrl: false,
       };
       if (effectiveUserId) {
@@ -390,24 +389,3 @@ try {
 
 spindle.toast.info(`RWBY Multi-Gen ready! (${CONFIG.imageCount} imgs/reply, NSFW: ${CONFIG.allowNsfw ? 'ON' : 'OFF'})`, { title: 'RWBY Multi-Gen', duration: 3500 });
 spindle.log.info('RWBY Scene Multi-Gen backend worker initialized.');
-And ensure your spindle.json has the valid GitHub fields:
-
-{
-  "version": "1.1.0",
-  "name": "RWBY Scene Multi-Gen",
-  "identifier": "rwby_scene_multi_gen",
-  "author": "User & Mousey",
-  "github": "https://github.com/Ac3r-del/Multigen-extension",
-  "homepage": "https://github.com/Ac3r-del/Multigen-extension",
-  "description": "Automatically generates multiple scene-reactive NovelAI images per assistant reply using the universal RWBY card style recipe and bakes them mid-chat into the message.",
-  "permissions": [
-    "image_gen",
-    "chats",
-    "chat_mutation",
-    "generation",
-    "characters",
-    "interceptor"
-  ],
-  "entry_backend": "backend.js",
-  "minimum_lumiverse_version": "0.1.0"
-}
