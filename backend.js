@@ -1,8 +1,9 @@
 /**
  * RWBY Scene Multi-Gen Backend Script
  * 
- * Multi-user and operator-scoped compatible:
- * Receives payload with `userId`, and supplies `userId` to all host calls.
+ * Multi-user and operator-scoped compatible.
+ * Generates NovelAI illustrations sequentially with retry/backoff
+ * to prevent 429 "Concurrent generation is locked" errors.
  */
 
 const BASE_STYLE_POSITIVE =
@@ -18,6 +19,10 @@ const CHARACTER_TAGS = {
   yang: 'yang xiao long, blonde hair, orange hair, purple eyes, ahoge, tan jacket, orange scarf, fingerless gloves, yellow theme',
   coco: 'coco adel, brown hair, short hair, beret, sunglasses, tinted sunglasses, round eyewear, brown eyes, necklace, scarf, brown jacket, black gloves, cross necklace, brown theme',
 };
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function detectCharacterSnippet(charName, content) {
   const lower = ((charName || '') + ' ' + (content || '')).toLowerCase();
@@ -73,6 +78,25 @@ function bakeImagesMidChat(content, imageMarkupList) {
   }
 
   return resultParagraphs.join(sep);
+}
+
+// Generate image with retry on NovelAI concurrent lock
+async function generateWithRetry(genInput, maxRetries = 5) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await spindle.imageGen.generate(genInput);
+    } catch (err) {
+      const msg = err ? err.message || String(err) : '';
+      const isLocked = msg.includes('Concurrent generation is locked') || msg.includes('429');
+      if (isLocked && attempt < maxRetries) {
+        const delay = attempt * 2000;
+        spindle.toast.info(`NovelAI busy, waiting ${delay / 1000}s (try ${attempt}/${maxRetries})...`, { title: 'RWBY Multi-Gen', duration: 2500 });
+        await sleep(delay);
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 const processing = new Set();
@@ -154,7 +178,10 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
 
     spindle.toast.info(`Generating ${beats.length} scene image(s) via NovelAI...`, { title: 'RWBY Multi-Gen', duration: 5000 });
 
-    const tasks = beats.map(async (beat) => {
+    // Generate sequentially so NovelAI's per-account concurrency limit is respected
+    const validAttachments = [];
+    for (let i = 0; i < beats.length; i++) {
+      const beat = beats[i];
       const prompt = `${BASE_STYLE_POSITIVE}, ${charSnippet}, ${beat.tags || 'upper body'}`;
       const genInput = {
         prompt,
@@ -172,17 +199,25 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
       if (effectiveUserId) {
         genInput.userId = effectiveUserId;
       }
-      return await spindle.imageGen.generate(genInput);
-    });
 
-    const results = await Promise.all(tasks);
-    const validAttachments = results
-      .filter((r) => r && (r.imageId || r.imageUrl))
-      .map((r) => ({
-        id: r.imageId,
-        url: r.imageUrl,
-        type: 'image',
-      }));
+      try {
+        const res = await generateWithRetry(genInput);
+        if (res && (res.imageId || res.imageUrl)) {
+          validAttachments.push({
+            id: res.imageId,
+            url: res.imageUrl,
+            type: 'image',
+          });
+        }
+      } catch (genErr) {
+        spindle.log.error(`Generation failed for beat ${i + 1}:`, genErr);
+      }
+
+      // Small cooldown between requests
+      if (i < beats.length - 1) {
+        await sleep(1500);
+      }
+    }
 
     if (validAttachments.length > 0) {
       const markupList = validAttachments.map(
@@ -236,7 +271,7 @@ spindle.on('GENERATION_ENDED', async (payload, userId) => {
     } catch (e) {
       spindle.log.error('GENERATION_ENDED handler failed:', e);
     }
-  }, 300);
+  }, 500);
 });
 
 // 2. MESSAGE_SENT & MESSAGE_SWIPED (receives payload and userId)
