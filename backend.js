@@ -4,20 +4,40 @@
  * Multi-user and operator-scoped compatible.
  * Generates NovelAI illustrations sequentially with retry/backoff
  * to prevent 429 "Concurrent generation is locked" errors.
+ * 
+ * Features:
+ * - Dynamic image count setting (1 to 4 images per assistant reply).
+ * - NSFW toggle (nsfw: true allows spicy/ecchi/explicit scene beats and tags,
+ *   removes solo/1girl restriction if pairing/sex, avoids purity suppression).
+ * - Command palette quick actions.
  */
 
-const BASE_STYLE_POSITIVE =
-  'masterpiece, best quality, very aesthetic, absurdres, 1girl, solo, rwby, gradient hair, shiny hair, detailed hair, detailed skin, rim light, backlighting';
+// Global configuration with sensible defaults
+let CONFIG = {
+  imageCount: 2,        // Number of images to generate (1 - 4)
+  allowNsfw: true,      // Allow NSFW/ecchi/spicy tags when scene is intimate
+  aspectRatio: '832x1216', // Default portrait resolution
+  steps: 28,
+  guidance: 5.0,
+};
 
-const BASE_STYLE_NEGATIVE =
-  'lowres, bad quality, sketch, flat color, greyscale, text, watermark, comic, sweat, sweaty skin, shiny skin, oily skin, glossy skin';
+const BASE_STYLE_POSITIVE =
+  'masterpiece, best quality, very aesthetic, absurdres, rwby, gradient hair, shiny hair, detailed hair, detailed skin, rim light, backlighting';
+
+// SFW mode bans explicit and nude content
+const BASE_STYLE_NEGATIVE_SFW =
+  'lowres, bad quality, sketch, flat color, greyscale, text, watermark, comic, sweat, sweaty skin, shiny skin, oily skin, glossy skin, nsfw, nude, explicit';
+
+// NSFW mode removes the purity ban while keeping clean matte anime skin
+const BASE_STYLE_NEGATIVE_NSFW =
+  'lowres, bad quality, sketch, flat color, greyscale, text, watermark, comic, shiny skin, oily skin, glossy skin, bad anatomy, deformed';
 
 const CHARACTER_TAGS = {
-  weiss: 'weiss schnee, white hair, light blue hair, side ponytail, hair ornament, tiara, earrings, blue eyes, scar over eye, white dress, bolero, blue theme',
-  ruby: 'ruby rose, black hair, red hair, short hair, silver eyes, red cloak, black dress, cross necklace, rose theme',
-  blake: 'blake belladonna, black hair, purple hair, cat ears, amber eyes, black scarf, white sleeveless shirt, detached sleeves, fingerless gloves, purple theme',
-  yang: 'yang xiao long, blonde hair, orange hair, purple eyes, ahoge, tan jacket, orange scarf, fingerless gloves, yellow theme',
-  coco: 'coco adel, brown hair, short hair, beret, sunglasses, tinted sunglasses, round eyewear, brown eyes, necklace, scarf, brown jacket, black gloves, cross necklace, brown theme',
+  weiss: 'weiss schnee, white hair, light blue hair, side ponytail, hair ornament, tiara, earrings, blue eyes, scar over eye',
+  ruby: 'ruby rose, black hair, red hair, short hair, silver eyes, red cloak, cross necklace',
+  blake: 'blake belladonna, black hair, purple hair, cat ears, animal ears, amber eyes',
+  yang: 'yang xiao long, blonde hair, orange hair, purple eyes, ahoge',
+  coco: 'coco adel, brown hair, short hair, beret, sunglasses, tinted sunglasses, round eyewear, brown eyes',
 };
 
 function sleep(ms) {
@@ -137,25 +157,34 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
     }
 
     const charSnippet = detectCharacterSnippet(charName, content);
+    const count = Math.max(1, Math.min(4, CONFIG.imageCount || 2));
+    const isNsfwAllowed = Boolean(CONFIG.allowNsfw);
 
     let defaultBeats = [
-      { tags: 'bedroom, sitting up, looking at viewer, gentle smile, dim lamplight' },
-      { tags: 'upper body, expressive eyes, dynamic pose, soft lighting' },
-    ];
+      { tags: isNsfwAllowed ? 'bedroom, lying on bed, intimate, blushing, looking at viewer, dim lamplight' : 'bedroom, sitting up, looking at viewer, gentle smile, dim lamplight' },
+      { tags: isNsfwAllowed ? 'undressing, exposed shoulders, heavy blush, passionate expression, soft lighting' : 'upper body, expressive eyes, dynamic pose, soft lighting' },
+      { tags: 'close-up, flushed face, parted lips, dramatic lighting' },
+      { tags: 'afterglow, relaxed pose, sweet smile, gentle morning light' },
+    ].slice(0, count);
 
     let beats = [];
     try {
+      const nsfwGuidance = isNsfwAllowed
+        ? 'NSFW and adult romance/intimate content IS PERMITTED and encouraged if the scene portrays intimacy, sex, nudity, or romance. Include accurate Danbooru tags for poses, nudity, intimacy, expressions, or clothing states (e.g. "lying on bed, straddling, nudity, breasts, blushing, heavy breathing, sweat, dim lighting", "reverse cowgirl, from behind, arched back, looking back, passionate", "hug from behind, couple, kissing, intimate", "afterglow, wrapped in blanket, messy hair, flushed").'
+        : 'Keep all tags strictly SFW (safe for work). Focus on facial expressions, safe poses, lighting, and environment.';
+
       const parsePrompt = [
-        'Analyze the roleplay message and pick 2 distinct visual moments or actions taking place.',
-        'Output ONLY a JSON array of two objects with a "tags" field containing comma-separated Danbooru anime tags (location, pose, expression, lighting).',
-        'Example: [{"tags": "bedroom, sitting on bed, reading book, blushing, lamplight"}, {"tags": "kitchen, holding plate, happy smile, cozy lighting"}]',
+        `Analyze the roleplay message and extract ${count} distinct chronological visual moments or emotional beats taking place.`,
+        nsfwGuidance,
+        `Output ONLY a valid JSON array of ${count} objects with a "tags" field containing comma-separated Danbooru anime tags describing the visual moment (subject, pose, framing, clothing/nudity state, facial expression, mood, lighting).`,
+        `Example: [{"tags": "bedroom, sitting on bed, reading book, blushing, lamplight"}, {"tags": "kitchen, holding plate, happy smile, cozy lighting"}]`,
         '',
-        `Message:\n"""${cleanMessageContent(content).slice(0, 3000)}"""`,
+        `Message:\n"""${cleanMessageContent(content).slice(0, 3500)}"""`,
       ].join('\n');
 
       const rawOptions = {
         messages: [{ role: 'user', content: parsePrompt }],
-        parameters: { temperature: 0.2, max_tokens: 250 },
+        parameters: { temperature: 0.2, max_tokens: 350 },
       };
       if (effectiveUserId) {
         rawOptions.userId = effectiveUserId;
@@ -165,7 +194,7 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
       const cleaned = (parsed.content || '').replace(/```json\n?|\n?```/g, '').trim();
       const extracted = JSON.parse(cleaned);
       if (Array.isArray(extracted) && extracted.length > 0) {
-        beats = extracted.slice(0, 2);
+        beats = extracted.slice(0, count);
       }
     } catch (llmErr) {
       spindle.log.warn(`LLM parsing failed or timed out: ${llmErr.message}, using scene fallbacks.`);
@@ -178,19 +207,27 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
 
     spindle.toast.info(`Generating ${beats.length} scene image(s) via NovelAI...`, { title: 'RWBY Multi-Gen', duration: 5000 });
 
+    const negativePrompt = isNsfwAllowed ? BASE_STYLE_NEGATIVE_NSFW : BASE_STYLE_NEGATIVE_SFW;
+
     // Generate sequentially so NovelAI's per-account concurrency limit is respected
     const validAttachments = [];
     for (let i = 0; i < beats.length; i++) {
       const beat = beats[i];
-      const prompt = `${BASE_STYLE_POSITIVE}, ${charSnippet}, ${beat.tags || 'upper body'}`;
+      const tags = (beat && beat.tags) ? beat.tags : 'upper body';
+
+      // If the beat tags indicate multiple people or couple intimacy, don't force 'solo, 1girl'
+      const isCouple = /couple|hetero|2girls|straddling|penetration|kissing|sex|hug|embrace/i.test(tags);
+      const subjectTag = isCouple ? '' : '1girl, solo, ';
+
+      const prompt = `${BASE_STYLE_POSITIVE}, ${subjectTag}${charSnippet}, ${tags}`;
       const genInput = {
         prompt,
-        negative_prompt: BASE_STYLE_NEGATIVE,
+        negative_prompt: negativePrompt,
         parameters: {
           sampler: 'k_euler_ancestral',
-          steps: 28,
-          guidance: 5,
-          resolution: '832x1216',
+          steps: CONFIG.steps || 28,
+          guidance: CONFIG.guidance || 5,
+          resolution: CONFIG.aspectRatio || '832x1216',
         },
         owner_chat_id: chatId,
         owner_character_id: activeChat ? activeChat.character_id : undefined,
@@ -213,7 +250,7 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
         spindle.log.error(`Generation failed for beat ${i + 1}:`, genErr);
       }
 
-      // Small cooldown between requests
+      // Cooldown between requests
       if (i < beats.length - 1) {
         await sleep(1500);
       }
@@ -295,35 +332,82 @@ spindle.on('MESSAGE_SWIPED', async (payload, userId) => {
   }
 });
 
-// 3. Command Palette: Manual trigger with context.userId
-spindle.commands.register([
-  {
-    id: 'generate-scene-images',
-    label: 'Generate Scene Images for Message',
-    description: 'Generates NovelAI illustrations and bakes them mid-chat into the current scene',
-    keywords: ['image', 'scene', 'generate', 'novelai', 'illustrate'],
-    scope: 'chat',
-  },
-]);
+// 3. Command Palette: Manual trigger & Settings controls
+try {
+  spindle.commands.register([
+    {
+      id: 'generate-scene-images',
+      label: 'Generate Scene Images for Message',
+      description: 'Generates NovelAI illustrations and bakes them mid-chat into the current scene',
+      keywords: ['image', 'scene', 'generate', 'novelai', 'illustrate'],
+      scope: 'chat',
+    },
+    {
+      id: 'toggle-nsfw-multigen',
+      label: 'RWBY Multi-Gen: Toggle NSFW (On/Off)',
+      description: 'Toggle whether intimate/spicy scene beats and NSFW tags are allowed',
+      keywords: ['nsfw', 'ecchi', 'toggle', 'adult', 'spicy', 'multigen'],
+      scope: 'global',
+    },
+    {
+      id: 'set-image-count',
+      label: 'RWBY Multi-Gen: Cycle Image Count (1-4)',
+      description: 'Cycle between 1, 2, 3, or 4 images generated per message',
+      keywords: ['count', 'images', 'amount', 'multigen'],
+      scope: 'global',
+    },
+  ]);
 
-spindle.commands.onInvoked(async (commandId, context) => {
-  if (commandId === 'generate-scene-images' && context && context.chatId) {
-    const targetUserId = context.userId || lastKnownUserId;
+  spindle.commands.onInvoked(async (commandId, context) => {
+    const targetUserId = (context && context.userId) || lastKnownUserId;
     if (targetUserId) lastKnownUserId = targetUserId;
 
-    try {
-      const messages = await spindle.chat.getMessages(context.chatId, targetUserId ? { tail: 5, userId: targetUserId } : { tail: 5 });
-      const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
-      if (lastAssistant) {
-        await handleSceneIllustration(context.chatId, lastAssistant.id, lastAssistant.swipe_id ?? 0, targetUserId);
-      } else {
-        spindle.toast.warning('No assistant message found to illustrate.');
+    if (commandId === 'generate-scene-images' && context && context.chatId) {
+      try {
+        const messages = await spindle.chat.getMessages(context.chatId, targetUserId ? { tail: 5, userId: targetUserId } : { tail: 5 });
+        const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+        if (lastAssistant) {
+          await handleSceneIllustration(context.chatId, lastAssistant.id, lastAssistant.swipe_id ?? 0, targetUserId);
+        } else {
+          spindle.toast.warning('No assistant message found to illustrate.');
+        }
+      } catch (err) {
+        spindle.toast.error(`Manual trigger error: ${err.message}`);
       }
-    } catch (err) {
-      spindle.toast.error(`Manual trigger error: ${err.message}`);
+    } else if (commandId === 'toggle-nsfw-multigen') {
+      CONFIG.allowNsfw = !CONFIG.allowNsfw;
+      spindle.toast.success(`RWBY Multi-Gen NSFW is now ${CONFIG.allowNsfw ? 'ENABLED (spicy/ecchi beats allowed)' : 'DISABLED (safe for work only)'}`, { title: 'RWBY Multi-Gen', duration: 4000 });
+    } else if (commandId === 'set-image-count') {
+      let nextCount = (CONFIG.imageCount || 2) + 1;
+      if (nextCount > 4) nextCount = 1;
+      CONFIG.imageCount = nextCount;
+      spindle.toast.success(`RWBY Multi-Gen will now generate ${nextCount} image(s) per message`, { title: 'RWBY Multi-Gen', duration: 4000 });
     }
-  }
-});
+  });
+} catch (cmdErr) {
+  spindle.log.warn('Could not register commands:', cmdErr);
+}
 
-spindle.toast.info('RWBY Scene Multi-Gen backend worker ready!', { title: 'RWBY Multi-Gen', duration: 3000 });
+spindle.toast.info(`RWBY Multi-Gen ready! (${CONFIG.imageCount} imgs/reply, NSFW: ${CONFIG.allowNsfw ? 'ON' : 'OFF'})`, { title: 'RWBY Multi-Gen', duration: 3500 });
 spindle.log.info('RWBY Scene Multi-Gen backend worker initialized.');
+And ensure your spindle.json has the valid GitHub fields:
+
+{
+  "version": "1.1.0",
+  "name": "RWBY Scene Multi-Gen",
+  "identifier": "rwby_scene_multi_gen",
+  "author": "User & Mousey",
+  "github": "https://github.com/Ac3r-del/Multigen-extension",
+  "homepage": "https://github.com/Ac3r-del/Multigen-extension",
+  "description": "Automatically generates multiple scene-reactive NovelAI images per assistant reply using the universal RWBY card style recipe and bakes them mid-chat into the message.",
+  "permissions": [
+    "image_gen",
+    "chats",
+    "chat_mutation",
+    "generation",
+    "characters",
+    "interceptor"
+  ],
+  "entry_backend": "backend.js",
+  "minimum_lumiverse_version": "0.1.0"
+}
