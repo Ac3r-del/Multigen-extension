@@ -1,9 +1,11 @@
 /**
  * RWBY Scene Multi-Gen Backend Script
+ * Inspired by Inlay Illustrator's lifecycle and mid-chat paragraph slotting:
  * 
- * Listens for new assistant replies and swipe additions,
- * parses visual beats from the scene, generates images via NovelAI
- * using the dialed-in RWBY card recipe, and attaches them to the message.
+ * 1. Interceptor: cleans baked image HTML blocks before sending prompts to the LLM.
+ * 2. Triggers: Listens for GENERATION_ENDED (chat turns / swipes) and command palette triggers.
+ * 3. Mid-Chat Baking: Inserts images right between natural paragraph breaks using
+ *    the RWBY card's native frame (.pimage-container).
  */
 
 const BASE_STYLE_POSITIVE =
@@ -30,30 +32,89 @@ function detectCharacterSnippet(charName, content) {
   return 'rwby';
 }
 
+// Strip baked image containers from messages before LLM sees them (idempotent, like Inlay Illustrator)
+function cleanMessageContent(content) {
+  if (typeof content !== 'string') return content;
+  return content
+    .replace(/\s*<!-- rwby_multigen -->\s*<div class="pimage-container"[\s\S]*?<\/div>/gi, '')
+    .replace(/\s*<div class="pimage-container" style="background-image: url\('[^']+'\);" tabindex="0"><\/div>/gi, '')
+    .trim();
+}
+
+// Register interceptor so LLM never sees raw visual HTML blocks in chat history
+try {
+  spindle.registerInterceptor(async (messages) => {
+    return messages.map((m) => {
+      if (typeof m.content === 'string') {
+        const cleaned = cleanMessageContent(m.content);
+        return cleaned === m.content ? m : { ...m, content: cleaned };
+      }
+      return m;
+    });
+  });
+} catch (e) {
+  spindle.log.warn('Could not register interceptor:', e);
+}
+
+// Split content into paragraphs and bake images into mid-chat blank line gaps
+function bakeImagesMidChat(content, imageMarkupList) {
+  const clean = cleanMessageContent(content);
+  if (!imageMarkupList || imageMarkupList.length === 0) return clean;
+
+  const sep = clean.includes('\r\n') ? '\r\n\r\n' : '\n\n';
+  const paragraphs = clean.split(/\r?\n\s*\r?\n/);
+
+  if (paragraphs.length <= 1) {
+    return clean + sep + imageMarkupList.join(sep);
+  }
+
+  const resultParagraphs = [...paragraphs];
+  const step = Math.max(1, Math.floor(paragraphs.length / (imageMarkupList.length + 1)));
+
+  let insertCount = 0;
+  for (let i = 0; i < imageMarkupList.length; i++) {
+    const slotIdx = Math.min(resultParagraphs.length - 1, (i + 1) * step + insertCount);
+    resultParagraphs.splice(slotIdx, 0, imageMarkupList[i]);
+    insertCount++;
+  }
+
+  return resultParagraphs.join(sep);
+}
+
 const processing = new Set();
 
-async function handleSceneGeneration(chatId, message) {
-  if (!message || message.role !== 'assistant') return;
-  if (!message.content || message.content.trim().length === 0) return;
+async function handleSceneIllustration(chatId, messageId, swipeId = 0) {
+  if (!chatId || !messageId) return;
 
-  const key = `${chatId}:${message.id}:${message.swipe_id ?? 0}`;
+  const key = `${chatId}:${messageId}:${swipeId}`;
   if (processing.has(key)) return;
   processing.add(key);
 
   try {
+    const messages = await spindle.chat.getMessages(chatId);
+    const message = (messages || []).find((m) => m.id === messageId);
+    if (!message || message.role !== 'assistant') return;
+
+    let content = message.content || '';
+    if (Array.isArray(message.swipes) && message.swipes[swipeId] !== undefined) {
+      content = message.swipes[swipeId];
+    }
+    if (!content || content.trim().length === 0) return;
+
+    if (content.includes('rwby_multigen') || content.includes('pimage-container')) {
+      return;
+    }
+
     spindle.toast.info('Analyzing scene for NovelAI illustration...', { title: 'RWBY Multi-Gen', duration: 4000 });
 
     let charName = '';
     const activeChat = await spindle.chats.getActive();
-    const targetChatId = chatId || (activeChat ? activeChat.id : null);
-    if (!targetChatId) return;
-
     if (activeChat && activeChat.character_id) {
       const charData = await spindle.characters.get(activeChat.character_id);
       if (charData) charName = charData.name;
     }
 
-    const charSnippet = detectCharacterSnippet(charName, message.content);
+    const charSnippet = detectCharacterSnippet(charName, content);
 
     let defaultBeats = [
       { tags: 'bedroom, sitting up, looking at viewer, gentle smile, dim lamplight' },
@@ -67,7 +128,7 @@ async function handleSceneGeneration(chatId, message) {
         'Output ONLY a JSON array of two objects with a "tags" field containing comma-separated Danbooru anime tags (location, pose, expression, lighting).',
         'Example: [{"tags": "bedroom, sitting on bed, reading book, blushing, lamplight"}, {"tags": "kitchen, holding plate, happy smile, cozy lighting"}]',
         '',
-        `Message:\n"""${message.content.slice(0, 3000)}"""`,
+        `Message:\n"""${cleanMessageContent(content).slice(0, 3000)}"""`,
       ].join('\n');
 
       const parsed = await spindle.generate.raw({
@@ -102,7 +163,7 @@ async function handleSceneGeneration(chatId, message) {
           guidance: 5,
           resolution: '832x1216',
         },
-        owner_chat_id: targetChatId,
+        owner_chat_id: chatId,
         owner_character_id: activeChat ? activeChat.character_id : undefined,
         includeDataUrl: false,
       });
@@ -118,17 +179,26 @@ async function handleSceneGeneration(chatId, message) {
       }));
 
     if (validAttachments.length > 0) {
-      const imageMarkup = validAttachments
-        .map((att) => `\n<div class="pimage-container" style="background-image: url('${att.url}');" tabindex="0"></div>`)
-        .join('\n');
+      const markupList = validAttachments.map(
+        (att) => `<!-- rwby_multigen -->\n<div class="pimage-container" style="background-image: url('${att.url}');" tabindex="0"></div>`
+      );
 
-      const updatedContent = (message.content || '').trimEnd() + '\n' + imageMarkup + '\n';
-      await spindle.chat.updateMessage(targetChatId, message.id, {
-        content: updatedContent,
-      });
+      const bakedContent = bakeImagesMidChat(content, markupList);
 
-      spindle.toast.success(`Generated and attached ${validAttachments.length} scene image(s)!`, { title: 'RWBY Multi-Gen', duration: 5000 });
-      spindle.log.info(`Generated ${validAttachments.length} images for chat ${targetChatId} msg ${message.id}`);
+      if (swipeId === (message.swipe_id ?? 0)) {
+        await spindle.chat.updateMessage(chatId, message.id, {
+          content: bakedContent,
+        });
+      } else if (Array.isArray(message.swipes)) {
+        const nextSwipes = [...message.swipes];
+        nextSwipes[swipeId] = bakedContent;
+        await spindle.chat.updateMessage(chatId, message.id, {
+          swipes: nextSwipes,
+        });
+      }
+
+      spindle.toast.success(`Generated and baked ${validAttachments.length} scene image(s) mid-chat!`, { title: 'RWBY Multi-Gen', duration: 5000 });
+      spindle.log.info(`Generated ${validAttachments.length} images for chat ${chatId} msg ${message.id}`);
     }
   } catch (err) {
     spindle.log.error('Multi-gen failed:', err);
@@ -138,26 +208,47 @@ async function handleSceneGeneration(chatId, message) {
   }
 }
 
-// 1. Listen for new assistant messages
-spindle.on('MESSAGE_SENT', async (payload) => {
-  if (!payload || !payload.message) return;
-  await handleSceneGeneration(payload.chatId, payload.message);
+// 1. GENERATION_ENDED: Primary trigger when assistant finishes streaming
+spindle.on('GENERATION_ENDED', async (payload) => {
+  if (!payload || payload.error) return;
+  const chatId = payload.chatId;
+  const messageId = payload.messageId;
+  if (!chatId || !messageId) return;
+
+  setTimeout(async () => {
+    try {
+      const messages = await spindle.chat.getMessages(chatId);
+      const msg = (messages || []).find((m) => m.id === messageId);
+      if (msg && msg.role === 'assistant') {
+        await handleSceneIllustration(chatId, messageId, msg.swipe_id ?? 0);
+      }
+    } catch (e) {
+      spindle.log.error('GENERATION_ENDED handler failed:', e);
+    }
+  }, 300);
 });
 
-// 2. Listen for newly added swipes
-spindle.on('MESSAGE_SWIPED', async (payload) => {
+// 2. Fallbacks for non-streaming or external writes
+spindle.on('MESSAGE_SENT', async (payload) => {
   if (!payload || !payload.message) return;
-  if (payload.action === 'added') {
-    await handleSceneGeneration(payload.chatId, payload.message);
+  if (payload.message.role === 'assistant') {
+    await handleSceneIllustration(payload.chatId, payload.message.id, payload.message.swipe_id ?? 0);
   }
 });
 
-// 3. Register Command Palette action for on-demand generation
+spindle.on('MESSAGE_SWIPED', async (payload) => {
+  if (!payload || !payload.message) return;
+  if (payload.action === 'added' && payload.message.role === 'assistant') {
+    await handleSceneIllustration(payload.chatId, payload.message.id, payload.swipeId ?? payload.message.swipe_id ?? 0);
+  }
+});
+
+// 3. Command Palette manual trigger
 spindle.commands.register([
   {
     id: 'generate-scene-images',
     label: 'Generate Scene Images for Message',
-    description: 'Generates NovelAI illustrations for the current scene message',
+    description: 'Generates NovelAI illustrations and bakes them mid-chat into the current scene',
     keywords: ['image', 'scene', 'generate', 'novelai', 'illustrate'],
     scope: 'chat',
   },
@@ -169,7 +260,7 @@ spindle.commands.onInvoked(async (commandId, context) => {
       const messages = await spindle.chat.getMessages(context.chatId, { tail: 5 });
       const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
       if (lastAssistant) {
-        await handleSceneGeneration(context.chatId, lastAssistant);
+        await handleSceneIllustration(context.chatId, lastAssistant.id, lastAssistant.swipe_id ?? 0);
       } else {
         spindle.toast.warning('No assistant message found to illustrate.');
       }
