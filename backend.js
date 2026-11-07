@@ -2,9 +2,8 @@
  * RWBY Scene Multi-Gen Backend Script
  * 
  * Direct narrative Danbooru extractor & NovelAI generator.
- * Zero reliance on fragile LLM json parsers.
- * Recognizes all characters, Beacon academy locations, weapons, semblances,
- * actions, domestic scenes, and full explicit NSFW positions.
+ * True context awareness: scores specific scene contexts, locations,
+ * outfits, emotions, weapons, and explicit NSFW positions.
  */
 
 let CONFIG = {
@@ -56,82 +55,86 @@ const CHARACTERS = {
   },
 };
 
-// COMPREHENSIVE BEACON & ACTION DICTIONARY
+// CATEGORIZED SCENE CONTEXT RULES
 const SCENE_RULES = [
-  // 1. Explicit NSFW & Intimacy
+  // 1. Explicit Sexual / NSFW (Highest specific priority when intimate words are physically happening)
   {
-    regex: /reverse cowgirl|riding reverse|facing away.*riding/i,
+    regex: /reverse cowgirl|riding reverse|facing away.*riding|rode him reverse/i,
     nsfwOnly: true,
     tags: 'bedroom, reverse cowgirl position, straddling, from behind, looking back, arched back, buttocks, nude, passionate expression, dim lamplight',
   },
   {
-    regex: /cowgirl|straddling|riding him|riding you|on top of/i,
+    regex: /against the wall|pinned to the wall|wall.*bouncing|wall.*downstroke/i,
     nsfwOnly: true,
-    tags: 'bedroom, cowgirl position, straddling, on top, bouncing, breasts, nude, heavy blush, open mouth, passionate, dim lighting',
+    tags: 'against wall, legs wrapped around waist, carried, standing sex, passionate kiss, clenching, flushed skin, dim room lighting',
   },
   {
-    regex: /against the wall|pinned to the wall|wall.*lift/i,
-    nsfwOnly: true,
-    tags: 'against wall, legs wrapped around waist, carried, lift, standing sex, passionate kiss, clenching, flushed skin, dim room lighting',
-  },
-  {
-    regex: /doggystyle|from behind|hands and knees|on all fours/i,
+    regex: /doggystyle|from behind.*hips|hands and knees.*thrust/i,
     nsfwOnly: true,
     tags: 'bedroom, doggystyle, from behind, on all fours, arched back, grabbed hips, nude, flushed face, panting, bed',
   },
   {
-    regex: /spooning|on their sides|slow.*push|slow.*grind/i,
+    regex: /cowgirl|straddling.*hips|riding him|riding you/i,
+    nsfwOnly: true,
+    tags: 'bedroom, cowgirl position, straddling, on top, bouncing, breasts, nude, heavy blush, open mouth, passionate, dim lighting',
+  },
+  {
+    regex: /spooning.*knot|slow.*grind|curled together.*knot/i,
     nsfwOnly: true,
     tags: 'bedroom, spooning, side-by-side, intimate embrace, slow grind, holding hands, tangled sheets, sweat, warm morning light, tender expression',
   },
   {
-    regex: /blowjob|fellatio|oral|down his throat|throat|swallow/i,
+    regex: /blowjob|fellatio|sinking down his length|throat.*swallow/i,
     nsfwOnly: true,
     tags: 'bedroom, fellatio, oral, looking up at viewer, parted lips, blush, messy hair, kneeling, saliva, intimate, lamplight',
   },
   {
-    regex: /afterglow|knotted|knot.*soften|curled together|morning light.*bed/i,
+    regex: /afterglow.*nude|naked.*sheets|tangled in bed.*sweat/i,
     nsfwOnly: true,
     tags: 'bedroom, lying on bed, afterglow, messy sheets, exhausted, relaxed, sweet smile, gentle blush, peaceful, soft morning sunlight',
   },
 
-  // 2. Domestic, Comedy, Food, Romance Novels
+  // 2. Domestic, Comedy, Food, Romance Novels (Dormitory Life)
   {
-    regex: /adobo|eating|pork|fork|dinner|plate|chew|reheating|snack|taco/i,
-    tags: 'indoor, dorm room, eating, holding fork, delicious food, happy expression, laughing, relaxed, warm ambient lighting',
+    regex: /adobo|glazed pork|pork belly|holding.*fork|eating.*meat|steaming.*bowl|food.*delicious/i,
+    tags: 'indoor, dorm room, eating, holding fork, delicious food, savory bowl, happy expression, laughing, relaxed, warm ambient lighting',
   },
   {
-    regex: /romance novel|paperback|novel|dust jacket|reading|book|hearts across the shattered moon/i,
+    regex: /romance novel|paperback|hearts across the shattered moon|reading.*bed|reading.*cushion|dust jacket.*novel/i,
     tags: 'sitting at desk, holding book, reading, secret, blushing, flustered, window alcove, warm lamp lighting, cozy atmosphere',
   },
   {
-    regex: /barge in|kicked the door|knocking|interrupted|door.*open/i,
+    regex: /scramble.*book|hide.*book|trench coat.*novel|cushion.*novel|stashing.*book/i,
+    tags: 'dorm room desk, hiding book, flustered expression, blushing, looking over shoulder, guilty, nervous smile, warm lighting',
+  },
+  {
+    regex: /barge in|kicked.*door|lockpick|hairpin|door.*wide open|honey I am home/i,
     tags: 'dorm room doorway, stepping inside, hands on hips, wide smile, energetic pose, teasing expression, bright eyes, indoor lighting',
   },
   {
-    regex: /teasing|smug|laughing|grin|winking|gag|waffle/i,
+    regex: /teasing|smug|laughing.*snort|winking|gagahara|lost cause/i,
     tags: 'playful smirk, teasing grin, leaning forward, winking, lively expression, animated pose, warm lighting',
   },
   {
-    regex: /scroll|texting|hologram|diagram|message/i,
+    regex: /scroll.*chat|holographic.*screen|diagram.*manual|reading.*text/i,
     tags: 'holding scroll, holographic screen, glowing blue screen, reading message, surprised expression, indoor',
   },
 
   // 3. Combat, Sparring, Semblance, Weapons
   {
-    regex: /spar|fencing|myrtenaster|rapier|thrust|lunge|parry/i,
+    regex: /spar.*ring|fencing.*manual|myrtenaster|rapier.*thrust|parry.*blade/i,
     tags: 'combat training hall, holding rapier, fencing stance, dynamic sword pose, fierce gaze, battle ready, motion lines, sharp rim light',
   },
   {
-    regex: /gauntlet|ember celica|punch|brawler|shotgun gauntlet/i,
+    regex: /gauntlet.*ember celica|shotgun gauntlet|brawler.*punch/i,
     tags: 'combat arena, shotgun gauntlets, ready stance, fiery aura, confident smirk, explosive motion, dramatic lighting',
   },
   {
-    regex: /glyph|ice dust|gravity dust|dust crystal|semblance/i,
+    regex: /glyph.*circle|ice dust|gravity dust|dust crystal|semblance.*burst/i,
     tags: 'summoning glyph, glowing magical circle beneath feet, ice particles, elemental sparks, dynamic action pose, intense lighting',
   },
   {
-    regex: /arena|training ring|training wing|gym/i,
+    regex: /arena.*plates|training ring.*chalk|training wing/i,
     tags: 'indoor arena, high ceiling, metallic training plates, chalk lines, athletic posture, focused gaze, fluorescent lighting',
   },
 ];
@@ -145,6 +148,7 @@ function cleanMessage(content) {
   return content
     .replace(/\s*<!-- rwby_multigen -->\s*<div class="pimage-container"[\s\S]*?<\/div>/gi, '')
     .replace(/\s*<div class="pimage-container" style="background-image: url\('[^']+'\);" tabindex="0"><\/div>/gi, '')
+    .replace(/<scene_plan[\s\S]*?<\/scene_plan>/gi, '')
     .replace(/<details[\s\S]*?<\/details>/gi, '')
     .replace(/<scenecard[\s\S]*?<\/scenecard>/gi, '')
     .replace(/<adventurecard[\s\S]*?<\/adventurecard>/gi, '')
@@ -206,11 +210,10 @@ async function generateWithRetry(genInput, maxRetries = 5) {
   }
 }
 
-// Extract the best character and scene beats directly from the narrative prose
+// Extract the active character and accurate scene beats from the narrative prose
 function analyzeStoryBeats(content, targetCount, isNsfwAllowed) {
-  // 1. Identify active character
-  // Check sprite tags first: <pimg src="Character.Emotion"> or {{image::Character::Emotion}}
-  let activeCharKey = 'yang'; // default fallback
+  // 1. Resolve character: check the MOST RECENT sprite tags in the message
+  let activeCharKey = 'yang';
   const spriteMatches = [...content.matchAll(/(?:<pimg\s+src=["']|{{image::)([^.]+?)(?:\.|\s*::)/gi)];
   if (spriteMatches.length > 0) {
     const lastSprite = spriteMatches[spriteMatches.length - 1][1].toLowerCase();
@@ -221,7 +224,7 @@ function analyzeStoryBeats(content, targetCount, isNsfwAllowed) {
       }
     }
   } else {
-    // Count raw occurrences in prose
+    // Frequency fallback
     let maxCount = -1;
     for (const [key, charDef] of Object.entries(CHARACTERS)) {
       const matchCount = (content.match(new RegExp(charDef.regex.source, 'gi')) || []).length;
@@ -234,7 +237,7 @@ function analyzeStoryBeats(content, targetCount, isNsfwAllowed) {
 
   const charTags = CHARACTERS[activeCharKey]?.tags || '1girl, solo';
 
-  // 2. Identify active scene action
+  // 2. Resolve matching scene beats
   const matchedBeats = [];
   for (const rule of SCENE_RULES) {
     if (rule.nsfwOnly && !isNsfwAllowed) continue;
@@ -243,13 +246,12 @@ function analyzeStoryBeats(content, targetCount, isNsfwAllowed) {
     }
   }
 
-  // If no specific rules matched, provide lively character fallbacks
+  // 3. Fallbacks matching the active character and setting
   if (matchedBeats.length === 0) {
     matchedBeats.push('standing, smiling, looking at viewer, expressive eyes, indoor, warm soft lighting');
     matchedBeats.push('upper body, dynamic pose, cheerful expression, detailed background, soft lighting');
   }
 
-  // Ensure we have enough beats for targetCount
   while (matchedBeats.length < targetCount) {
     matchedBeats.push(matchedBeats[0] + ', alternate angle, cinematic lighting');
   }
