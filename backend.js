@@ -1,21 +1,15 @@
 /**
  * RWBY Scene Multi-Gen Backend Script
  * 
- * Generates NovelAI illustrations sequentially with retry/backoff
- * to prevent 429 "Concurrent generation is locked" errors.
- * 
- * Features:
- * - 100% Dynamic & Chat-Aware: Directly mirrors the active character and setting
- *   from native card sprite triggers (<pimg src="Character.Emotion"> or {{image::Character::Emotion}}).
- * - Multi-character support: Weiss, Blake, Yang, Ruby, Coco, etc.
- * - Dynamic scene awareness: adapts to reading, eating, combat, talking, or intimate NSFW.
- * - Zero hardcoded bedroom/sparring locks.
+ * Direct narrative Danbooru extractor & NovelAI generator.
+ * Zero reliance on fragile LLM json parsers.
+ * Recognizes all characters, Beacon academy locations, weapons, semblances,
+ * actions, domestic scenes, and full explicit NSFW positions.
  */
 
-// Configure generation settings here:
 let CONFIG = {
-  imageCount: 2,        // Number of images to generate (1 to 4)
-  allowNsfw: true,      // Allow intimate/spicy tags when the scene is actually romantic/sexual
+  imageCount: 2,        // 1 to 4 images
+  allowNsfw: true,      // true allows explicit intimate/spicy tags
   aspectRatio: '832x1216',
   steps: 28,
   guidance: 5.0,
@@ -30,78 +24,132 @@ const BASE_STYLE_NEGATIVE_SFW =
 const BASE_STYLE_NEGATIVE_NSFW =
   'lowres, bad quality, sketch, flat color, greyscale, text, watermark, comic, shiny skin, oily skin, glossy skin, bad anatomy, deformed';
 
-const KNOWN_RWBY_CHARACTERS = {
-  weiss: 'weiss schnee, white hair, light blue hair, side ponytail, hair ornament, tiara, earrings, blue eyes, scar over eye',
-  ruby: 'ruby rose, black hair, red hair, short hair, silver eyes, red cloak, cross necklace',
-  blake: 'blake belladonna, black hair, purple hair, cat ears, animal ears, amber eyes',
-  yang: 'yang xiao long, blonde hair, orange hair, purple eyes, ahoge',
-  coco: 'coco adel, brown hair, short hair, beret, sunglasses, tinted sunglasses, round eyewear, brown eyes',
-  nora: 'nora valkyrie, orange hair, short hair, turquoise eyes',
-  pyrrha: 'pyrrha nikos, red hair, ponytail, green eyes, circlet',
+// CHARACTER DICTIONARY
+const CHARACTERS = {
+  yang: {
+    regex: /\byang\b|xiao long/i,
+    tags: 'yang xiao long, blonde hair, long hair, orange hair, purple eyes, ahoge, tan jacket, crop top, fingerless gloves, yellow theme',
+  },
+  blake: {
+    regex: /\bblake\b|belladonna/i,
+    tags: 'blake belladonna, black hair, long hair, purple hair, cat ears, animal ears, amber eyes, black ribbon, white sleeveless shirt, purple theme',
+  },
+  weiss: {
+    regex: /\bweiss\b|schnee/i,
+    tags: 'weiss schnee, white hair, light blue hair, side ponytail, hair ornament, tiara, earrings, blue eyes, scar over eye, white dress, bolero, blue theme',
+  },
+  ruby: {
+    regex: /\bruby\b|rose/i,
+    tags: 'ruby rose, black hair, red hair, short hair, silver eyes, red cloak, black dress, cross necklace, rose theme',
+  },
+  coco: {
+    regex: /\bcoco\b|adel/i,
+    tags: 'coco adel, brown hair, short hair, beret, sunglasses, tinted sunglasses, round eyewear, brown eyes, necklace, scarf, brown jacket, brown theme',
+  },
+  nora: {
+    regex: /\bnora\b|valkyrie/i,
+    tags: 'nora valkyrie, orange hair, short hair, turquoise eyes, pink theme',
+  },
+  pyrrha: {
+    regex: /\bpyrrha\b|nikos/i,
+    tags: 'pyrrha nikos, red hair, long ponytail, green eyes, gold circlet, armor, red theme',
+  },
 };
+
+// COMPREHENSIVE BEACON & ACTION DICTIONARY
+const SCENE_RULES = [
+  // 1. Explicit NSFW & Intimacy
+  {
+    regex: /reverse cowgirl|riding reverse|facing away.*riding/i,
+    nsfwOnly: true,
+    tags: 'bedroom, reverse cowgirl position, straddling, from behind, looking back, arched back, buttocks, nude, passionate expression, dim lamplight',
+  },
+  {
+    regex: /cowgirl|straddling|riding him|riding you|on top of/i,
+    nsfwOnly: true,
+    tags: 'bedroom, cowgirl position, straddling, on top, bouncing, breasts, nude, heavy blush, open mouth, passionate, dim lighting',
+  },
+  {
+    regex: /against the wall|pinned to the wall|wall.*lift/i,
+    nsfwOnly: true,
+    tags: 'against wall, legs wrapped around waist, carried, lift, standing sex, passionate kiss, clenching, flushed skin, dim room lighting',
+  },
+  {
+    regex: /doggystyle|from behind|hands and knees|on all fours/i,
+    nsfwOnly: true,
+    tags: 'bedroom, doggystyle, from behind, on all fours, arched back, grabbed hips, nude, flushed face, panting, bed',
+  },
+  {
+    regex: /spooning|on their sides|slow.*push|slow.*grind/i,
+    nsfwOnly: true,
+    tags: 'bedroom, spooning, side-by-side, intimate embrace, slow grind, holding hands, tangled sheets, sweat, warm morning light, tender expression',
+  },
+  {
+    regex: /blowjob|fellatio|oral|down his throat|throat|swallow/i,
+    nsfwOnly: true,
+    tags: 'bedroom, fellatio, oral, looking up at viewer, parted lips, blush, messy hair, kneeling, saliva, intimate, lamplight',
+  },
+  {
+    regex: /afterglow|knotted|knot.*soften|curled together|morning light.*bed/i,
+    nsfwOnly: true,
+    tags: 'bedroom, lying on bed, afterglow, messy sheets, exhausted, relaxed, sweet smile, gentle blush, peaceful, soft morning sunlight',
+  },
+
+  // 2. Domestic, Comedy, Food, Romance Novels
+  {
+    regex: /adobo|eating|pork|fork|dinner|plate|chew|reheating|snack|taco/i,
+    tags: 'indoor, dorm room, eating, holding fork, delicious food, happy expression, laughing, relaxed, warm ambient lighting',
+  },
+  {
+    regex: /romance novel|paperback|novel|dust jacket|reading|book|hearts across the shattered moon/i,
+    tags: 'sitting at desk, holding book, reading, secret, blushing, flustered, window alcove, warm lamp lighting, cozy atmosphere',
+  },
+  {
+    regex: /barge in|kicked the door|knocking|interrupted|door.*open/i,
+    tags: 'dorm room doorway, stepping inside, hands on hips, wide smile, energetic pose, teasing expression, bright eyes, indoor lighting',
+  },
+  {
+    regex: /teasing|smug|laughing|grin|winking|gag|waffle/i,
+    tags: 'playful smirk, teasing grin, leaning forward, winking, lively expression, animated pose, warm lighting',
+  },
+  {
+    regex: /scroll|texting|hologram|diagram|message/i,
+    tags: 'holding scroll, holographic screen, glowing blue screen, reading message, surprised expression, indoor',
+  },
+
+  // 3. Combat, Sparring, Semblance, Weapons
+  {
+    regex: /spar|fencing|myrtenaster|rapier|thrust|lunge|parry/i,
+    tags: 'combat training hall, holding rapier, fencing stance, dynamic sword pose, fierce gaze, battle ready, motion lines, sharp rim light',
+  },
+  {
+    regex: /gauntlet|ember celica|punch|brawler|shotgun gauntlet/i,
+    tags: 'combat arena, shotgun gauntlets, ready stance, fiery aura, confident smirk, explosive motion, dramatic lighting',
+  },
+  {
+    regex: /glyph|ice dust|gravity dust|dust crystal|semblance/i,
+    tags: 'summoning glyph, glowing magical circle beneath feet, ice particles, elemental sparks, dynamic action pose, intense lighting',
+  },
+  {
+    regex: /arena|training ring|training wing|gym/i,
+    tags: 'indoor arena, high ceiling, metallic training plates, chalk lines, athletic posture, focused gaze, fluorescent lighting',
+  },
+];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function detectActiveSceneCharacter(content) {
-  if (typeof content !== 'string') return 'rwby';
-
-  // 1. Check card sprite triggers like <pimg src="Yang Xiao Long.smile"> or {{image::Yang Xiao Long::smile}}
-  const spriteMatches = [...content.matchAll(/(?:<pimg\s+src=["']|{{image::)([^.]+?)(?:\.|\s*::)/gi)];
-  if (spriteMatches.length > 0) {
-    const lastName = spriteMatches[spriteMatches.length - 1][1].toLowerCase();
-    if (lastName.includes('yang')) return 'yang';
-    if (lastName.includes('blake')) return 'blake';
-    if (lastName.includes('weiss')) return 'weiss';
-    if (lastName.includes('ruby')) return 'ruby';
-    if (lastName.includes('coco')) return 'coco';
-  }
-
-  // 2. Count mention frequencies in the actual narrative text
-  const lower = content.toLowerCase();
-  const counts = {
-    yang: (lower.match(/\byang\b/g) || []).length,
-    blake: (lower.match(/\bblake\b/g) || []).length,
-    weiss: (lower.match(/\bweiss\b/g) || []).length,
-    ruby: (lower.match(/\bruby\b/g) || []).length,
-    coco: (lower.match(/\bcoco\b/g) || []).length,
-  };
-
-  let maxChar = 'rwby';
-  let maxCount = 0;
-  for (const [ch, cnt] of Object.entries(counts)) {
-    if (cnt > maxCount) {
-      maxCount = cnt;
-      maxChar = ch;
-    }
-  }
-
-  return maxChar;
-}
-
-function cleanNarrativeContent(content) {
+function cleanMessage(content) {
   if (typeof content !== 'string') return '';
   return content
     .replace(/\s*<!-- rwby_multigen -->\s*<div class="pimage-container"[\s\S]*?<\/div>/gi, '')
     .replace(/\s*<div class="pimage-container" style="background-image: url\('[^']+'\);" tabindex="0"><\/div>/gi, '')
-    .replace(/<scene_plan>[\s\S]*?<\/scene_plan>/gi, '')
-    .replace(/<tracker>[\s\S]*?<\/tracker>/gi, '')
-    .replace(/<companions[\s\S]*?<\/companions>/gi, '')
-    .replace(/<status>[\s\S]*?<\/status>/gi, '')
-    .replace(/<relationships>[\s\S]*?<\/relationships>/gi, '')
-    .replace(/<threads>[\s\S]*?<\/threads>/gi, '')
-    .replace(/<plotlines>[\s\S]*?<\/plotlines>/gi, '')
-    .replace(/<meanwhile>[\s\S]*?<\/meanwhile>/gi, '')
-    .replace(/<truths>[\s\S]*?<\/truths>/gi, '')
-    .replace(/<psych>[\s\S]*?<\/psych>/gi, '')
-    .replace(/<undercurrents>[\s\S]*?<\/undercurrents>/gi, '')
     .replace(/<details[\s\S]*?<\/details>/gi, '')
     .replace(/<scenecard[\s\S]*?<\/scenecard>/gi, '')
     .replace(/<adventurecard[\s\S]*?<\/adventurecard>/gi, '')
     .replace(/<internal_states[\s\S]*?<\/internal_states>/gi, '')
-    .replace(/<visuals>[\s\S]*?<\/visuals>/gi, '')
-    .replace(/<[^>]+>/g, '') // strip remaining XML/HTML tags
+    .replace(/<[^>]+>/g, '')
     .trim();
 }
 
@@ -124,25 +172,19 @@ try {
 
 function bakeImagesMidChat(content, imageMarkupList) {
   if (!imageMarkupList || imageMarkupList.length === 0) return content;
-
   const sep = content.includes('\r\n') ? '\r\n\r\n' : '\n\n';
   const paragraphs = content.split(/\r?\n\s*\r?\n/);
+  if (paragraphs.length <= 1) return content + sep + imageMarkupList.join(sep);
 
-  if (paragraphs.length <= 1) {
-    return content + sep + imageMarkupList.join(sep);
-  }
-
-  const resultParagraphs = [...paragraphs];
+  const result = [...paragraphs];
   const step = Math.max(1, Math.floor(paragraphs.length / (imageMarkupList.length + 1)));
-
   let insertCount = 0;
   for (let i = 0; i < imageMarkupList.length; i++) {
-    const slotIdx = Math.min(resultParagraphs.length - 1, (i + 1) * step + insertCount);
-    resultParagraphs.splice(slotIdx, 0, imageMarkupList[i]);
+    const slotIdx = Math.min(result.length - 1, (i + 1) * step + insertCount);
+    result.splice(slotIdx, 0, imageMarkupList[i]);
     insertCount++;
   }
-
-  return resultParagraphs.join(sep);
+  return result.join(sep);
 }
 
 // Generate image with retry on NovelAI concurrent lock
@@ -164,6 +206,60 @@ async function generateWithRetry(genInput, maxRetries = 5) {
   }
 }
 
+// Extract the best character and scene beats directly from the narrative prose
+function analyzeStoryBeats(content, targetCount, isNsfwAllowed) {
+  // 1. Identify active character
+  // Check sprite tags first: <pimg src="Character.Emotion"> or {{image::Character::Emotion}}
+  let activeCharKey = 'yang'; // default fallback
+  const spriteMatches = [...content.matchAll(/(?:<pimg\s+src=["']|{{image::)([^.]+?)(?:\.|\s*::)/gi)];
+  if (spriteMatches.length > 0) {
+    const lastSprite = spriteMatches[spriteMatches.length - 1][1].toLowerCase();
+    for (const [key, charDef] of Object.entries(CHARACTERS)) {
+      if (charDef.regex.test(lastSprite)) {
+        activeCharKey = key;
+        break;
+      }
+    }
+  } else {
+    // Count raw occurrences in prose
+    let maxCount = -1;
+    for (const [key, charDef] of Object.entries(CHARACTERS)) {
+      const matchCount = (content.match(new RegExp(charDef.regex.source, 'gi')) || []).length;
+      if (matchCount > maxCount) {
+        maxCount = matchCount;
+        activeCharKey = key;
+      }
+    }
+  }
+
+  const charTags = CHARACTERS[activeCharKey]?.tags || '1girl, solo';
+
+  // 2. Identify active scene action
+  const matchedBeats = [];
+  for (const rule of SCENE_RULES) {
+    if (rule.nsfwOnly && !isNsfwAllowed) continue;
+    if (rule.regex.test(content)) {
+      matchedBeats.push(rule.tags);
+    }
+  }
+
+  // If no specific rules matched, provide lively character fallbacks
+  if (matchedBeats.length === 0) {
+    matchedBeats.push('standing, smiling, looking at viewer, expressive eyes, indoor, warm soft lighting');
+    matchedBeats.push('upper body, dynamic pose, cheerful expression, detailed background, soft lighting');
+  }
+
+  // Ensure we have enough beats for targetCount
+  while (matchedBeats.length < targetCount) {
+    matchedBeats.push(matchedBeats[0] + ', alternate angle, cinematic lighting');
+  }
+
+  return {
+    characterKey: activeCharKey,
+    characterTags: charTags,
+    beats: matchedBeats.slice(0, targetCount),
+  };
+}
 const processing = new Set();
 let lastKnownUserId = undefined;
 
@@ -192,109 +288,25 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
       return;
     }
 
-    spindle.toast.info('Analyzing scene for NovelAI illustration...', { title: 'RWBY Multi-Gen', duration: 4000 });
-
-    const activeCharKey = detectActiveSceneCharacter(content);
-    const cleanProse = cleanNarrativeContent(content);
     const count = Math.max(1, Math.min(4, Number(CONFIG.imageCount) || 2));
     const isNsfwAllowed = Boolean(CONFIG.allowNsfw);
 
-    let beats = [];
-    try {
-      const parsePrompt = [
-        `You are an anime art director. Read this story turn and generate ${count} scene illustration prompts.`,
-        `The primary character active in this scene is: ${activeCharKey.toUpperCase()}.`,
-        ``,
-        `Task:`,
-        `Describe ${count} distinct visual moments of ${activeCharKey.toUpperCase()} based on what is happening in the text (e.g. eating, laughing, teasing, holding a book, sparring, sitting, or bedroom intimacy).`,
-        isNsfwAllowed
-          ? `NSFW NOTE: If and ONLY if the scene involves nudity or sexual intercourse, include appropriate intimate tags. If it is non-sexual (e.g. talking, teasing, eating, fighting), depict the actual non-sexual activity accurately.`
-          : `Keep tags strictly SFW (safe for work).`,
-        ``,
-        `Output ONLY a JSON array of ${count} objects with:`,
-        `- "character": "${activeCharKey}"`,
-        `- "tags": comma-separated Danbooru tags (outfit, pose, facial expression, props, setting, lighting)`,
-        ``,
-        `Story Prose:`,
-        `"""${cleanProse.slice(0, 3000)}"""`,
-      ].join('\n');
+    spindle.toast.info('Analyzing scene for NovelAI illustration...', { title: 'RWBY Multi-Gen', duration: 3500 });
 
-      const rawOptions = {
-        messages: [{ role: 'user', content: parsePrompt }],
-        parameters: { temperature: 0.1, max_tokens: 350 },
-      };
-      if (effectiveUserId) {
-        rawOptions.userId = effectiveUserId;
-      }
+    const cleanProse = cleanMessage(content);
+    const { characterKey, characterTags, beats } = analyzeStoryBeats(cleanProse, count, isNsfwAllowed);
 
-      const parsed = await spindle.generate.raw(rawOptions);
-      const cleaned = (parsed.content || '').replace(/```json\n?|\n?```/g, '').trim();
-      const extracted = JSON.parse(cleaned);
-      if (Array.isArray(extracted) && extracted.length > 0) {
-        beats = extracted.slice(0, count);
-      }
-    } catch (llmErr) {
-      spindle.log.warn(`LLM parsing failed: ${llmErr.message}, building dynamic heuristic beats.`);
-    }// Dynamic heuristic fallback if LLM extraction returned empty
-    if (!Array.isArray(beats) || beats.length === 0) {
-      const lower = cleanProse.toLowerCase();
-      const isCombat = /spar|fenc|rapier|sword|gauntlet|parry|slash|blade|arena|ring|combat/i.test(lower);
-      const isReading = /book|read|paperback|novel|alcov|cushion/i.test(lower);
-      const isEating = /adobo|eat|food|pork|fork|chew|dinner|plate/i.test(lower);
-      const isTeasing = /laugh|grin|smirk|teas|waffle|chuckle|giggle/i.test(lower);
-      const isSex = /knot|thigh|naked|nude|sex|riding|clit|cock|pussy|bed/i.test(lower) && isNsfwAllowed;
-
-      if (isSex) {
-        beats = [
-          { character: activeCharKey, tags: 'bedroom, lying on bed, intimate, blushing, dim lamplight' },
-          { character: activeCharKey, tags: 'straddling, passionate expression, flushed face, soft lighting' },
-        ].slice(0, count);
-      } else if (isCombat) {
-        beats = [
-          { character: activeCharKey, tags: 'combat arena, fighting stance, dynamic pose, fierce gaze, battle ready, rim lighting' },
-          { character: activeCharKey, tags: 'parrying, dynamic action pose, focused expression, motion lines' },
-        ].slice(0, count);
-      } else if (isEating || isTeasing) {
-        beats = [
-          { character: activeCharKey, tags: 'indoor, laughing, smiling, expressive eyes, holding fork, warm indoor lighting' },
-          { character: activeCharKey, tags: 'upper body, teasing grin, wink, relaxed posture, casual lighting' },
-        ].slice(0, count);
-      } else if (isReading) {
-        beats = [
-          { character: activeCharKey, tags: 'sitting, holding book, reading, velvet cushions, window alcove, warm lamp lighting, gentle smile' },
-          { character: activeCharKey, tags: 'looking up from book, expressive eyes, relaxed pose, indoor' },
-        ].slice(0, count);
-      } else {
-        beats = [
-          { character: activeCharKey, tags: 'sitting, looking at viewer, expressive eyes, gentle lighting' },
-          { character: activeCharKey, tags: 'upper body, smiling, indoor, soft ambient lighting' },
-        ].slice(0, count);
-      }
-    }
-
-    spindle.toast.info(`Generating ${beats.length} scene image(s) for ${activeCharKey.toUpperCase()}...`, { title: 'RWBY Multi-Gen', duration: 5000 });
+    spindle.toast.info(`Generating ${beats.length} image(s) for ${characterKey.toUpperCase()}...`, { title: 'RWBY Multi-Gen', duration: 4000 });
 
     const negativePrompt = isNsfwAllowed ? BASE_STYLE_NEGATIVE_NSFW : BASE_STYLE_NEGATIVE_SFW;
 
-    // Generate sequentially so NovelAI's per-account concurrency limit is respected
     const validAttachments = [];
     for (let i = 0; i < beats.length; i++) {
-      const beat = beats[i];
-      const beatChar = (beat.character || activeCharKey).toLowerCase();
-      const beatTags = beat.tags || 'upper body, looking at viewer';
-
-      // Match character tags dynamically from the resolved character
-      let charTag = KNOWN_RWBY_CHARACTERS[activeCharKey] || KNOWN_RWBY_CHARACTERS.rwby || 'rwby';
-      if (beatChar.includes('yang')) charTag = KNOWN_RWBY_CHARACTERS.yang;
-      else if (beatChar.includes('blake')) charTag = KNOWN_RWBY_CHARACTERS.blake;
-      else if (beatChar.includes('weiss')) charTag = KNOWN_RWBY_CHARACTERS.weiss;
-      else if (beatChar.includes('ruby')) charTag = KNOWN_RWBY_CHARACTERS.ruby;
-      else if (beatChar.includes('coco')) charTag = KNOWN_RWBY_CHARACTERS.coco;
-
+      const beatTags = beats[i];
       const isCouple = /couple|hetero|2girls|straddling|penetration|kissing|sex|hug|embrace/i.test(beatTags);
       const subjectTag = isCouple ? '' : '1girl, solo, ';
 
-      const prompt = `${BASE_STYLE_POSITIVE}, ${subjectTag}${charTag}, ${beatTags}`;
+      const prompt = `${BASE_STYLE_POSITIVE}, ${subjectTag}${characterTags}, ${beatTags}`;
       const genInput = {
         prompt,
         negative_prompt: negativePrompt,
@@ -325,7 +337,6 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
         spindle.log.error(`Generation failed for beat ${i + 1}:`, genErr);
       }
 
-      // Cooldown between requests
       if (i < beats.length - 1) {
         await sleep(1500);
       }
@@ -352,7 +363,7 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
 
       await spindle.chat.updateMessage(chatId, message.id, patch);
 
-      spindle.toast.success(`Generated and baked ${validAttachments.length} scene image(s) mid-chat!`, { title: 'RWBY Multi-Gen', duration: 5000 });
+      spindle.toast.success(`Generated and baked ${validAttachments.length} scene image(s) mid-chat!`, { title: 'RWBY Multi-Gen', duration: 4000 });
       spindle.log.info(`Generated ${validAttachments.length} images for chat ${chatId} msg ${message.id}`);
     }
   } catch (err) {
