@@ -1,9 +1,10 @@
 /**
  * RWBY Scene Multi-Gen Backend Script — PART 1 OF 2
  * 
- * Direct narrative Danbooru extractor & NovelAI generator.
- * True context awareness: scores specific scene contexts, locations,
- * outfits, emotions, weapons, and comprehensive explicit NSFW positions.
+ * Inlay-style Context Analyzer & NovelAI Multi-Gen Pipeline.
+ * Reads the actual narrative context, emotions, positions, and locations
+ * using LLM comprehension with regex failover.
+ * Locks the card art style permanently via BASE_STYLE_POSITIVE / NEGATIVE.
  */
 
 let CONFIG = {
@@ -12,8 +13,10 @@ let CONFIG = {
   aspectRatio: '832x1216',
   steps: 28,
   guidance: 5.0,
+  useLlmContext: true,  // Use LLM narrative comprehension for deep context
 };
 
+// IMMUTABLE CARD ART STYLE LOCK
 const BASE_STYLE_POSITIVE =
   'masterpiece, best quality, very aesthetic, absurdres, rwby, gradient hair, shiny hair, detailed hair, detailed skin, rim light, backlighting';
 
@@ -55,7 +58,7 @@ const CHARACTERS = {
   },
 };
 
-// CATEGORIZED SCENE CONTEXT RULES
+// CATEGORIZED SCENE CONTEXT RULES (Fast pattern matching & fallback)
 const SCENE_RULES = [
   // 1. Explicit Sexual / NSFW (Intimacy, Positions, Foreplay, Climax, Afterglow)
   {
@@ -160,19 +163,19 @@ const SCENE_RULES = [
     tags: 'sitting at desk, holding book, reading, secret, blushing, flustered, window alcove, warm lamp lighting, cozy atmosphere',
   },
   {
-    regex: /scramble.*book|hide.*book|trench coat.*novel|cushion.*novel|stashing.*book|cramming.*under thigh/i,
+    regex: /scramble.*book|hide.*book|trench coat.*novel|cushion.*novel|stashing.*book|cramming.*under thigh|guarding.*gear/i,
     tags: 'dorm room desk, hiding book, flustered expression, blushing, looking over shoulder, guilty, nervous smile, warm lighting',
   },
   {
-    regex: /dramatically.*recit|cleared her throat.*gravitas|holding book high|reading out loud.*teas/i,
+    regex: /dramatically.*recit|cleared her throat.*gravitas|holding book high|reading out loud.*teas|laughing.*clutching stomach/i,
     tags: 'standing in room, holding book high above head, theatrical pose, laughing, teasing face, open mouth shouting with joy, bright indoor light',
   },
   {
-    regex: /barge in|kicked.*door|lockpick|hairpin|door.*wide open|honey I am home|unauthorized pop/i,
+    regex: /barge in|kicked.*door|lockpick|hairpin|door.*wide open|honey I am home|unauthorized pop|spring latch.*clicks|student identity card/i,
     tags: 'dorm room doorway, stepping inside, hands on hips, wide smile, energetic pose, teasing expression, bright eyes, indoor lighting',
   },
   {
-    regex: /teasing|smug|laughing.*snort|winking|gagahara|lost cause|deadpan pity/i,
+    regex: /teasing|smug|laughing.*snort|winking|gagahara|lost cause|deadpan pity|bursts into.*laughter/i,
     tags: 'playful smirk, teasing grin, leaning forward, winking, lively expression, animated pose, warm lighting',
   },
   {
@@ -289,10 +292,76 @@ async function generateWithRetry(genInput, maxRetries = 5) {
     }
   }
 }
+/**
+ * RWBY Scene Multi-Gen Backend Script — PART 2 OF 2
+ * 
+ * Context Comprehension Engine & Generation Loop.
+ * Integrates Inlay-style story understanding through spindle LLM analysis,
+ * with instant fallback to categorized scene rules.
+ * Strictly guarantees NovelAI card-art style lock.
+ */
 
-// Extract the active character and accurate scene beats from the narrative prose
-function analyzeStoryBeats(content, targetCount, isNsfwAllowed) {
-  // 1. Resolve character: check the MOST RECENT sprite tags in the message
+// LLM Story Context Analyzer (Inlay Illustrator design)
+async function extractContextWithLlm(content, targetCount, isNsfwAllowed, userId = undefined) {
+  try {
+    const prompt = `Analyze this RWBY roleplay story turn and extract the visual context for illustration.
+Return ONLY valid JSON with this exact schema:
+{
+  "activeCharacter": "yang" | "blake" | "weiss" | "ruby" | "coco" | "nora" | "pyrrha",
+  "beats": [
+    "danbooru style scene tags for beat 1",
+    "danbooru style scene tags for beat 2"
+  ]
+}
+
+Rules:
+1. Identify who is actively on-screen and interacting.
+2. Translate their actual action, posture, location, facial expression, and interaction into concise Danbooru visual tags (comma-separated).
+3. Do NOT include style words like masterpiece or quality (the renderer adds them).
+4. Provide exactly ${targetCount} sequential or distinct emotional/action beats from the story.
+5. ${isNsfwAllowed ? 'If the scene contains physical intimacy or sexual acts, describe the exact positions and anatomy.' : 'Keep tags safe for work.'}
+
+Story text:
+"""
+${content.slice(0, 3500)}
+"""`;
+
+    const requestPayload = {
+      messages: [
+        { role: 'system', content: 'You are an expert anime image prompt director and Danbooru tag annotator.' },
+        { role: 'user', content: prompt }
+      ],
+      parameters: {
+        temperature: 0.3,
+        max_tokens: 350
+      }
+    };
+    if (userId) requestPayload.userId = userId;
+
+    const res = await spindle.generate.raw(requestPayload);
+    const rawText = typeof res === 'string' ? res : (res?.content || res?.text || res?.choices?.[0]?.message?.content || '');
+    const cleanJson = rawText.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleanJson);
+
+    if (parsed && parsed.activeCharacter && Array.isArray(parsed.beats) && parsed.beats.length > 0) {
+      const charKey = String(parsed.activeCharacter).toLowerCase().trim();
+      const resolvedCharKey = CHARACTERS[charKey] ? charKey : 'yang';
+      return {
+        characterKey: resolvedCharKey,
+        characterTags: CHARACTERS[resolvedCharKey].tags,
+        beats: parsed.beats.map((b) => String(b).trim()).slice(0, targetCount),
+        source: 'llm'
+      };
+    }
+  } catch (err) {
+    spindle.log.warn('LLM story context analysis failed, falling back to rule-based extractor:', err.message);
+  }
+  return null;
+}
+
+// Rule-based narrative analysis (Instant, robust fallback)
+function extractContextWithRules(content, targetCount, isNsfwAllowed) {
+  // 1. Resolve character: check the MOST RECENT sprite tags or frequency
   let activeCharKey = 'yang';
   const spriteMatches = [...content.matchAll(/(?:<pimg\s+src=["']|{{image::)([^.]+?)(?:\.|\s*::)/gi)];
   if (spriteMatches.length > 0) {
@@ -304,7 +373,6 @@ function analyzeStoryBeats(content, targetCount, isNsfwAllowed) {
       }
     }
   } else {
-    // Frequency fallback
     let maxCount = -1;
     for (const [key, charDef] of Object.entries(CHARACTERS)) {
       const matchCount = (content.match(new RegExp(charDef.regex.source, 'gi')) || []).length;
@@ -326,7 +394,6 @@ function analyzeStoryBeats(content, targetCount, isNsfwAllowed) {
     }
   }
 
-  // 3. Fallbacks matching the active character and setting
   if (matchedBeats.length === 0) {
     matchedBeats.push('standing, smiling, looking at viewer, expressive eyes, indoor, warm soft lighting');
     matchedBeats.push('upper body, dynamic pose, cheerful expression, detailed background, soft lighting');
@@ -340,8 +407,23 @@ function analyzeStoryBeats(content, targetCount, isNsfwAllowed) {
     characterKey: activeCharKey,
     characterTags: charTags,
     beats: matchedBeats.slice(0, targetCount),
+    source: 'rules'
   };
 }
+
+async function analyzeStoryBeats(content, targetCount, isNsfwAllowed, userId = undefined) {
+  if (CONFIG.useLlmContext) {
+    const llmResult = await extractContextWithLlm(content, targetCount, isNsfwAllowed, userId);
+    if (llmResult && llmResult.beats && llmResult.beats.length > 0) {
+      while (llmResult.beats.length < targetCount) {
+        llmResult.beats.push(llmResult.beats[0] + ', alternate angle, cinematic lighting');
+      }
+      return llmResult;
+    }
+  }
+  return extractContextWithRules(content, targetCount, isNsfwAllowed);
+}
+
 const processing = new Set();
 let lastKnownUserId = undefined;
 
@@ -373,12 +455,12 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
     const count = Math.max(1, Math.min(4, Number(CONFIG.imageCount) || 2));
     const isNsfwAllowed = Boolean(CONFIG.allowNsfw);
 
-    spindle.toast.info('Analyzing scene for NovelAI illustration...', { title: 'RWBY Multi-Gen', duration: 3500 });
+    spindle.toast.info('Analyzing narrative context for NovelAI illustration...', { title: 'RWBY Multi-Gen', duration: 3500 });
 
     const cleanProse = cleanMessage(content);
-    const { characterKey, characterTags, beats } = analyzeStoryBeats(cleanProse, count, isNsfwAllowed);
+    const { characterKey, characterTags, beats, source } = await analyzeStoryBeats(cleanProse, count, isNsfwAllowed, effectiveUserId);
 
-    spindle.toast.info(`Generating ${beats.length} image(s) for ${characterKey.toUpperCase()}...`, { title: 'RWBY Multi-Gen', duration: 4000 });
+    spindle.toast.info(`Generating ${beats.length} scene image(s) for ${characterKey.toUpperCase()} (${source})...`, { title: 'RWBY Multi-Gen', duration: 4000 });
 
     const negativePrompt = isNsfwAllowed ? BASE_STYLE_NEGATIVE_NSFW : BASE_STYLE_NEGATIVE_SFW;
 
@@ -388,6 +470,7 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
       const isCouple = /couple|hetero|2girls|straddling|penetration|kissing|sex|hug|embrace/i.test(beatTags);
       const subjectTag = isCouple ? '' : '1girl, solo, ';
 
+      // INVIOLABLE STYLE LOCK: Base style always leads, followed by character & scene context
       const prompt = `${BASE_STYLE_POSITIVE}, ${subjectTag}${characterTags}, ${beatTags}`;
       const genInput = {
         prompt,
