@@ -1,9 +1,9 @@
 /**
- * RWBY Scene Multi-Gen Backend Script
+ * RWBY Scene Multi-Gen Backend Script — PART 1 OF 2
  * 
  * Direct narrative Danbooru extractor & NovelAI generator.
  * True context awareness: scores specific scene contexts, locations,
- * outfits, emotions, weapons, and explicit NSFW positions.
+ * outfits, emotions, weapons, and comprehensive explicit NSFW positions.
  */
 
 let CONFIG = {
@@ -57,85 +57,165 @@ const CHARACTERS = {
 
 // CATEGORIZED SCENE CONTEXT RULES
 const SCENE_RULES = [
-  // 1. Explicit Sexual / NSFW (Highest specific priority when intimate words are physically happening)
+  // 1. Explicit Sexual / NSFW (Intimacy, Positions, Foreplay, Climax, Afterglow)
   {
-    regex: /reverse cowgirl|riding reverse|facing away.*riding|rode him reverse/i,
+    regex: /reverse cowgirl|riding reverse|facing away.*riding|rode him reverse|back turned.*straddling/i,
     nsfwOnly: true,
     tags: 'bedroom, reverse cowgirl position, straddling, from behind, looking back, arched back, buttocks, nude, passionate expression, dim lamplight',
   },
   {
-    regex: /against the wall|pinned to the wall|wall.*bouncing|wall.*downstroke/i,
-    nsfwOnly: true,
-    tags: 'against wall, legs wrapped around waist, carried, standing sex, passionate kiss, clenching, flushed skin, dim room lighting',
-  },
-  {
-    regex: /doggystyle|from behind.*hips|hands and knees.*thrust/i,
-    nsfwOnly: true,
-    tags: 'bedroom, doggystyle, from behind, on all fours, arched back, grabbed hips, nude, flushed face, panting, bed',
-  },
-  {
-    regex: /cowgirl|straddling.*hips|riding him|riding you/i,
+    regex: /cowgirl|straddling.*hips|riding him|riding you|on top of him.*bouncing|rocking hips.*on top/i,
     nsfwOnly: true,
     tags: 'bedroom, cowgirl position, straddling, on top, bouncing, breasts, nude, heavy blush, open mouth, passionate, dim lighting',
   },
   {
-    regex: /spooning.*knot|slow.*grind|curled together.*knot/i,
+    regex: /against the wall|pinned to the wall|wall.*bouncing|wall.*downstroke|lifted against.*wall|pressed to the wall.*hips/i,
+    nsfwOnly: true,
+    tags: 'against wall, legs wrapped around waist, carried, standing sex, passionate kiss, clenching, flushed skin, dim room lighting',
+  },
+  {
+    regex: /doggystyle|from behind.*hips|hands and knees.*thrust|bent over.*bed|rear entrance|taking him from behind/i,
+    nsfwOnly: true,
+    tags: 'bedroom, doggystyle, from behind, on all fours, arched back, grabbed hips, nude, flushed face, panting, bed',
+  },
+  {
+    regex: /missionary|pinned beneath|beneath him.*bed|looking up.*bed|legs spread|spread wide.*bed|holding her ankles|ankles over shoulders/i,
+    nsfwOnly: true,
+    tags: 'bedroom, missionary position, on back, looking up, legs spread, intimate eye contact, passionate embrace, tangled bed sheets, flushed skin, soft lamp lighting',
+  },
+  {
+    regex: /spooning.*knot|slow.*grind|curled together.*knot|on their sides.*thrust|spooning sex|side-by-side.*grinding/i,
     nsfwOnly: true,
     tags: 'bedroom, spooning, side-by-side, intimate embrace, slow grind, holding hands, tangled sheets, sweat, warm morning light, tender expression',
   },
   {
-    regex: /blowjob|fellatio|sinking down his length|throat.*swallow/i,
+    regex: /blowjob|fellatio|sinking down his length|throat.*swallow|deepthroat|bobbing head|between his thighs.*mouth/i,
     nsfwOnly: true,
-    tags: 'bedroom, fellatio, oral, looking up at viewer, parted lips, blush, messy hair, kneeling, saliva, intimate, lamplight',
+    tags: 'bedroom, fellatio, oral, looking up at viewer, parted lips, heavy blush, messy hair, kneeling, saliva trail, intimate, dim lamplight',
   },
   {
-    regex: /afterglow.*nude|naked.*sheets|tangled in bed.*sweat/i,
+    regex: /cunnilingus|licking her|between her legs.*tongue|tasting her|oral.*lap|drinking her in|head between her thighs/i,
+    nsfwOnly: true,
+    tags: 'bedroom, cunnilingus, oral sex, head between legs, hands in hair, arched back, toes curling, ecstatic expression, trembling thighs, dim ambient light',
+  },
+  {
+    regex: /paizuri|titfuck|breasts.*cleavage.*cock|rubbing.*breasts|between her tits/i,
+    nsfwOnly: true,
+    tags: 'bedroom, paizuri, breast hold, cleavage, looking down, flustered blush, heavy panting, kneeling on bed, warm lamplight',
+  },
+  {
+    regex: /strip|undressing|peeling off.*shirt|bra.*drop|panties.*slide|removing clothes|bare shoulders.*unbutton/i,
+    nsfwOnly: true,
+    tags: 'bedroom, undressing, removing shirt, unbuttoning, exposed shoulders, underwear, bra, parted lips, shy blush, alluring gaze, dim lamplight',
+  },
+  {
+    regex: /shower.*steam|steamy bathroom|wet skin.*shower|bath.*together|soap.*lather|water dripping.*curves/i,
+    nsfwOnly: true,
+    tags: 'bathroom, steamy shower, wet hair, wet skin, water droplets, glass door, bare body, intimate shower, sensual pose, soft diffuse light',
+  },
+  {
+    regex: /knotting|canine knot|swelling inside|locked together|knot catches|stretch.*knot|knot.*pulse/i,
+    nsfwOnly: true,
+    tags: 'bedroom, locked together, intense climax, clenching, arched spine, heavy blush, tears of pleasure, panting mouth, disheveled sheets, soft backlight',
+  },
+  {
+    regex: /afterglow.*nude|naked.*sheets|tangled in bed.*sweat|curled on chest.*bed|soft panting.*afterglow/i,
     nsfwOnly: true,
     tags: 'bedroom, lying on bed, afterglow, messy sheets, exhausted, relaxed, sweet smile, gentle blush, peaceful, soft morning sunlight',
   },
 
-  // 2. Domestic, Comedy, Food, Romance Novels (Dormitory Life)
+  // 2. Romantic, Flirting, Physical Touch & Body Contact
   {
-    regex: /adobo|glazed pork|pork belly|holding.*fork|eating.*meat|steaming.*bowl|food.*delicious/i,
+    regex: /massage.*shoulders|hands on.*trapezius|rubbing.*neck|kneading.*knots|shoulder rub/i,
+    tags: 'dorm room, leaning over chair, giving massage, hands on shoulders, playful smile, leaning close, gentle touch, cozy warm lighting',
+  },
+  {
+    regex: /scratched.*ear|fondling.*ears|touching.*ear|ear.*twitch|sensitive.*fur|caressing.*tail/i,
+    tags: 'dorm room, teasingly touching animal ears, close proximity, mischievous grin, flustered expression, red cheeks, warm ambient glow',
+  },
+  {
+    regex: /tackled.*bookshelf|pinned against.*shelf|crowding into.*space|hands around.*wrists|inches away.*face/i,
+    tags: 'pressed against wooden bookshelf, close intimate face-to-face, holding wrists, eye contact, breath on lips, playful confrontation, warm lamp lighting',
+  },
+  {
+    regex: /passionate kiss|lips pressed|kissed deeply|tasting lips|locking lips|stolen kiss/i,
+    tags: 'intimate embrace, kissing, lips touching, closed eyes, hands cupping cheek, romantic atmosphere, soft warm glow, cinematic lighting',
+  },
+  {
+    regex: /lap pillow|head in lap|resting head.*thighs|stroking hair.*lap/i,
+    tags: 'indoor, sitting on couch, lap pillow, resting head on thighs, stroking hair, serene smile, tender affection, soft window light',
+  },
+  {
+    regex: /hugging from behind|arms wrapped around.*waist|chin on shoulder|back hug/i,
+    tags: 'standing, back hug, arms around waist, chin resting on shoulder, sweet affectionate smile, cozy clothing, warm golden hour light',
+  },
+
+  // 3. Domestic, Comedy, Food, Romance Novels (Dormitory Life)
+  {
+    regex: /adobo|glazed pork|pork belly|holding.*fork|eating.*meat|steaming.*bowl|food.*delicious|skewers.*pork/i,
     tags: 'indoor, dorm room, eating, holding fork, delicious food, savory bowl, happy expression, laughing, relaxed, warm ambient lighting',
   },
   {
-    regex: /romance novel|paperback|hearts across the shattered moon|reading.*bed|reading.*cushion|dust jacket.*novel/i,
+    regex: /romance novel|paperback|hearts across the shattered moon|reading.*bed|reading.*cushion|dust jacket.*novel|bodice-ripper/i,
     tags: 'sitting at desk, holding book, reading, secret, blushing, flustered, window alcove, warm lamp lighting, cozy atmosphere',
   },
   {
-    regex: /scramble.*book|hide.*book|trench coat.*novel|cushion.*novel|stashing.*book/i,
+    regex: /scramble.*book|hide.*book|trench coat.*novel|cushion.*novel|stashing.*book|cramming.*under thigh/i,
     tags: 'dorm room desk, hiding book, flustered expression, blushing, looking over shoulder, guilty, nervous smile, warm lighting',
   },
   {
-    regex: /barge in|kicked.*door|lockpick|hairpin|door.*wide open|honey I am home/i,
+    regex: /dramatically.*recit|cleared her throat.*gravitas|holding book high|reading out loud.*teas/i,
+    tags: 'standing in room, holding book high above head, theatrical pose, laughing, teasing face, open mouth shouting with joy, bright indoor light',
+  },
+  {
+    regex: /barge in|kicked.*door|lockpick|hairpin|door.*wide open|honey I am home|unauthorized pop/i,
     tags: 'dorm room doorway, stepping inside, hands on hips, wide smile, energetic pose, teasing expression, bright eyes, indoor lighting',
   },
   {
-    regex: /teasing|smug|laughing.*snort|winking|gagahara|lost cause/i,
+    regex: /teasing|smug|laughing.*snort|winking|gagahara|lost cause|deadpan pity/i,
     tags: 'playful smirk, teasing grin, leaning forward, winking, lively expression, animated pose, warm lighting',
   },
   {
-    regex: /scroll.*chat|holographic.*screen|diagram.*manual|reading.*text/i,
+    regex: /scroll.*chat|holographic.*screen|diagram.*manual|reading.*text|video call|scroll ringing/i,
     tags: 'holding scroll, holographic screen, glowing blue screen, reading message, surprised expression, indoor',
   },
-
-  // 3. Combat, Sparring, Semblance, Weapons
   {
-    regex: /spar.*ring|fencing.*manual|myrtenaster|rapier.*thrust|parry.*blade/i,
+    regex: /drinking juice|pineapple juice|sipping.*glass|juice tumbler|gulp/i,
+    tags: 'sitting at desk, holding drinking glass, sipping juice, looking sideways nervously, indoor warm lighting',
+  },
+
+  // 4. Combat, Sparring, Semblance, Weapons & Beacon Academy
+  {
+    regex: /spar.*ring|fencing.*manual|myrtenaster|rapier.*thrust|parry.*blade|fencing stance|fourth atlesian/i,
     tags: 'combat training hall, holding rapier, fencing stance, dynamic sword pose, fierce gaze, battle ready, motion lines, sharp rim light',
   },
   {
-    regex: /gauntlet.*ember celica|shotgun gauntlet|brawler.*punch/i,
+    regex: /gauntlet.*ember celica|shotgun gauntlet|brawler.*punch|combustion dust|explosive punch/i,
     tags: 'combat arena, shotgun gauntlets, ready stance, fiery aura, confident smirk, explosive motion, dramatic lighting',
   },
   {
-    regex: /glyph.*circle|ice dust|gravity dust|dust crystal|semblance.*burst/i,
+    regex: /scythe.*crescent rose|sniper scythe|high-caliber sniper|recoil jump|rose petals.*dash/i,
+    tags: 'combat ground, wielding giant scythe, red rose petals fluttering, energetic combat leap, silver eyes, dynamic motion blur',
+  },
+  {
+    regex: /gambol shroud|kusarigama|cleaver ribbon|shadow clone|shadow decoy/i,
+    tags: 'shadowy arena, dual wielding blade and ribbon, shadow clone fading behind, agile mid-air spin, focused feline eyes, moody rim lighting',
+  },
+  {
+    regex: /glyph.*circle|ice dust|gravity dust|dust crystal|semblance.*burst|summoning glyph/i,
     tags: 'summoning glyph, glowing magical circle beneath feet, ice particles, elemental sparks, dynamic action pose, intense lighting',
   },
   {
-    regex: /arena.*plates|training ring.*chalk|training wing/i,
+    regex: /arena.*plates|training ring.*chalk|training wing|gymnasium|ring 4/i,
     tags: 'indoor arena, high ceiling, metallic training plates, chalk lines, athletic posture, focused gaze, fluorescent lighting',
+  },
+  {
+    regex: /courtyard.*beacon|beacon cliff|emerald forest|beacon tower|rooftop.*night/i,
+    tags: 'outdoor Beacon academy, majestic architecture, stone terrace, evening sky, gentle breeze, distant forest, grand cinematic view',
+  },
+  {
+    regex: /curfew.*patrol|glynda.*patrol|riding crop|footsteps.*corridor|goodwitch/i,
+    tags: 'dark dormitory hallway, peering around corner, sneaking, finger to lips, shushing, stealthy posture, shadows',
   },
 ];
 
