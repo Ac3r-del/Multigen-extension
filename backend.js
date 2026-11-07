@@ -5,14 +5,17 @@
  * to prevent 429 "Concurrent generation is locked" errors.
  * 
  * Features:
+ * - Accurate scene analysis: accurately depicts what is actually happening
+ *   (e.g., sparring, fighting, reading, dining, or bed/intimacy when NSFW).
  * - Dynamic image count (1 to 4 images per assistant reply).
- * - NSFW toggle (intimate, passionate, and explicit scene beats allowed).
+ * - Contextual NSFW: allows intimacy/bedding when the scene is actually romantic/sexual,
+ *   without forcing bedroom tags onto combat, training, or public scenes.
  */
 
 // Configure generation settings here:
 let CONFIG = {
   imageCount: 2,        // Number of images to generate (1 to 4)
-  allowNsfw: true,      // Set to true for NSFW/intimate scenes, false for SFW only
+  allowNsfw: true,      // Allow intimate/spicy tags when the scene is actually romantic/sexual
   aspectRatio: '832x1216',
   steps: 28,
   guidance: 5.0,
@@ -54,6 +57,10 @@ function cleanMessageContent(content) {
   return content
     .replace(/\s*<!-- rwby_multigen -->\s*<div class="pimage-container"[\s\S]*?<\/div>/gi, '')
     .replace(/\s*<div class="pimage-container" style="background-image: url\('[^']+'\);" tabindex="0"><\/div>/gi, '')
+    .replace(/<details[\s\S]*?<\/details>/gi, '')
+    .replace(/<scenecard[\s\S]*?<\/scenecard>/gi, '')
+    .replace(/<adventurecard[\s\S]*?<\/adventurecard>/gi, '')
+    .replace(/<internal_states[\s\S]*?<\/internal_states>/gi, '')
     .trim();
 }
 
@@ -159,37 +166,60 @@ async function handleSceneIllustration(chatId, messageId, swipeId = 0, userId = 
     const count = Math.max(1, Math.min(4, Number(CONFIG.imageCount) || 2));
     const isNsfwAllowed = Boolean(CONFIG.allowNsfw);
 
-    let defaultBeats = [
-      { tags: isNsfwAllowed ? 'bedroom, lying on bed, intimate, blushing, looking at viewer, dim lamplight' : 'bedroom, sitting up, looking at viewer, gentle smile, dim lamplight' },
-      { tags: isNsfwAllowed ? 'undressing, exposed shoulders, heavy blush, passionate expression, soft lighting' : 'upper body, expressive eyes, dynamic pose, soft lighting' },
-      { tags: 'close-up, flushed face, parted lips, dramatic lighting' },
-      { tags: 'afterglow, relaxed pose, sweet smile, gentle morning light' },
-    ].slice(0, count);
+    // Dynamic scene fallback based on content keywords
+    const lowerContent = content.toLowerCase();
+    const isCombatOrSpar = /spar|fenc|rapier|sword|gauntlet|strike|dodge|parry|slash|blade|dust|punch|kick|training|arena|ring|combat/i.test(lowerContent);
+    const isSexOrIntimate = /knot|thigh|naked|nude|sex|riding|clit|cock|pussy|breast|groan|moan|kiss|bedroom|mattress|bed/i.test(lowerContent);
+
+    let defaultBeats = [];
+    if (isCombatOrSpar) {
+      defaultBeats = [
+        { tags: 'training arena, sparring, holding weapon, rapier, combat stance, focused expression, dynamic lighting' },
+        { tags: 'training ring, parry, dynamic pose, fierce gaze, battle ready, motion blur, sharp rim light' },
+        { tags: 'fencing stance, ready position, intense eyes, high ceiling, indoor training ground' },
+        { tags: 'catching breath, panting, determined smile, looking at viewer, post-spar' },
+      ].slice(0, count);
+    } else if (isSexOrIntimate && isNsfwAllowed) {
+      defaultBeats = [
+        { tags: 'bedroom, lying on bed, intimate, blushing, looking at viewer, dim lamplight' },
+        { tags: 'undressing, exposed shoulders, heavy blush, passionate expression, soft lighting' },
+        { tags: 'close-up, flushed face, parted lips, dramatic lighting' },
+        { tags: 'afterglow, relaxed pose, sweet smile, gentle morning light' },
+      ].slice(0, count);
+    } else {
+      defaultBeats = [
+        { tags: 'sitting, looking at viewer, expressive eyes, indoor, gentle lighting' },
+        { tags: 'upper body, dynamic pose, smiling, detailed background, soft lighting' },
+        { tags: 'close-up portrait, thoughtful expression, ambient lighting' },
+        { tags: 'relaxed posture, conversing, casual lighting' },
+      ].slice(0, count);
+    }
 
     let beats = [];
     try {
-      const nsfwGuidance = isNsfwAllowed
-        ? 'NSFW and adult romance/intimate content IS PERMITTED and encouraged if the scene portrays intimacy, sex, nudity, or romance. Include accurate Danbooru tags for poses, nudity, intimacy, expressions, or clothing states (e.g. "lying on bed, straddling, nudity, breasts, blushing, heavy breathing, sweat, dim lighting", "reverse cowgirl, from behind, arched back, looking back, passionate", "hug from behind, couple, kissing, intimate", "afterglow, wrapped in blanket, messy hair, flushed").'
-        : 'Keep all tags strictly SFW (safe for work). Focus on facial expressions, safe poses, lighting, and environment.';
+      const nsfwClause = isNsfwAllowed
+        ? 'If (and ONLY if) the message is depicting sexual intercourse, nudity, or bedroom intimacy, include accurate Danbooru tags for those intimate poses and clothing states. If the scene is a fight, training, classroom, or public conversation, DO NOT use bedroom or sex tags — accurately depict the actual activity.'
+        : 'All tags must be strictly Safe For Work (SFW). Focus on the actual action, attire, pose, and environment.';
 
       const parsePrompt = [
-        `Analyze the roleplay message and extract ${count} distinct chronological visual moments or emotional beats taking place.`,
-        nsfwGuidance,
-        `Output ONLY a valid JSON array of ${count} objects with a "tags" field containing comma-separated Danbooru anime tags describing the visual moment (subject, pose, framing, clothing/nudity state, facial expression, mood, lighting).`,
-        `Example: [{"tags": "bedroom, sitting on bed, reading book, blushing, lamplight"}, {"tags": "kitchen, holding plate, happy smile, cozy lighting"}]`,
+        `You are an anime art director. Read the roleplay message and identify exactly what is taking place right now (e.g. combat training, sword sparring, conversation, walking, eating, or bedroom intimacy).`,
+        `Extract ${count} distinct chronological visual moments from the text.`,
+        nsfwClause,
+        `Output ONLY a valid JSON array of ${count} objects with a "tags" field containing concise comma-separated Danbooru anime tags (setting, outfit/armor, weapon/props, action pose, expression, lighting).`,
+        `Example for a spar: [{"tags": "training arena, combat stance, holding rapier, fencing pose, intense expression, dust effect, sharp lighting"}, {"tags": "training ring, parrying strike, dynamic action, focused eyes, motion lines"}]`,
         '',
         `Message:\n"""${cleanMessageContent(content).slice(0, 3500)}"""`,
       ].join('\n');
 
       const rawOptions = {
         messages: [{ role: 'user', content: parsePrompt }],
-        parameters: { temperature: 0.2, max_tokens: 350 },
+        parameters: { temperature: 0.1, max_tokens: 350 },
       };
       if (effectiveUserId) {
         rawOptions.userId = effectiveUserId;
       }
 
-      const parsed = await spindle.generate.raw(rawOptions);
+      const parsed = await spindle.generate.quiet ? await spindle.generate.quiet(rawOptions) : await spindle.generate.raw(rawOptions);
       const cleaned = (parsed.content || '').replace(/```json\n?|\n?```/g, '').trim();
       const extracted = JSON.parse(cleaned);
       if (Array.isArray(extracted) && extracted.length > 0) {
